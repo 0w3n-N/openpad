@@ -44,16 +44,20 @@ what the plugin does on your system.
   shown and the PDFs and images on its pages. A "can draw" guest can add ink
   and remove only ink tagged with their own id. Guests can't read other
   notebooks, sync, turn pages for others, rename or restructure anything, add
-  files, start window capture, or reach any owner endpoint. **New links**
-  replaces both tokens and disconnects every guest. At most 20 guests can
-  connect.
+  files, start window capture, or reach any owner endpoint. Guest tokens
+  are new every time OpenPad starts, and **New links** replaces them sooner
+  and disconnects every guest. At most 20 guests can connect.
+- **Nothing shown by default.** When no notebook is open on the iPad (at
+  start, or after the one on screen is deleted), the share window and guests
+  get an empty, read-only placeholder, never another notebook.
 - **Browser attacks.** Requests whose `Host` isn't this computer are refused,
   which blocks DNS rebinding. Requests that carry an `Origin` must come from
   OpenPad's own pages. The one exception is the installed app's origin,
   `https://0w3n-n.github.io`, which may make requests with the owner key
   (CORS) but is refused with guest tokens.
-- **Pairing PIN.** The installed app gets the key by sending the 6-digit PIN
-  shown on the computer. A PIN expires after 10 minutes or 5 wrong tries, works
+- **Connecting the installed app.** It reads the key from the QR code the
+  computer shows (the same code as the Safari link), or trades the 6-digit
+  PIN shown under it for the key. A PIN expires after 10 minutes or 5 wrong tries, works
   once, and the server accepts one try per second.
 - **Opening the share window** uses a one-time code that expires after 60 s,
   so the key never appears on a process command line.

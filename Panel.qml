@@ -370,7 +370,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: "Scan with the iPad's Camera, or open the link in Safari"
+              text: "Scan with the iPad: in the OpenPad app tap Connect, or use the Camera app"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body

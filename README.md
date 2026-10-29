@@ -157,33 +157,31 @@ the folder.
 ### Start it and connect the iPad
 
 Switch OpenPad on from the bar icon (Omarchy), the Start menu (Windows), or
-run `openpad`. The share window opens with a **Pair** card. There are two ways
-to use the iPad:
+run `openpad`. The bar popup and the share window's **Pair** card show one QR
+code. It works two ways:
 
-| | Safari | Installed app |
-| --- | --- | --- |
-| Setup | scan the QR code | install a certificate once, add to Home Screen, enter a PIN |
-| Works with the computer off | no | yes |
-| Where notebooks live | iPad and computer | iPad and computer |
+- **In the OpenPad app:** tap **Connect to computer** and scan the code. The
+  app then syncs and shows your open notebook on the computer.
+- **With the iPad Camera app:** OpenPad opens in Safari right away, with
+  nothing to install. That copy needs the computer to be on, and it offers to
+  install the app.
 
-**Safari:** scan the QR code with the iPad Camera. You can add that page to
-the Home Screen too, but it still needs the computer to be on.
-
-**Installed app:** choose **Install the iPad app** on the Pair card and scan
-its QR code. The setup page walks you through three steps:
+**Installing the app** (about a minute, once). The Safari copy's **Set up**
+banner, or Settings › Connect in the app, links to these steps:
 
 1. Download OpenPad's certificate and turn it on in Settings › General ›
-   About › Certificate Trust Settings. The installed app talks to your
-   computer over HTTPS. Your computer made this certificate itself, and it is
-   restricted to private network addresses, so it can't be used to
-   impersonate websites.
-2. Open the app (it's hosted at https://0w3n-n.github.io/openpad/) and use
-   Share › **Add to Home Screen**.
-3. In the app, tap **Pair** and enter the address and 6-digit PIN shown on the
-   computer.
+   About › Certificate Trust Settings. The app talks to your computer over
+   HTTPS, which needs this certificate. Your computer made the certificate
+   itself, and it only works for private network addresses, so it can't be
+   used to impersonate websites.
+2. Open https://0w3n-n.github.io/openpad/ and use Share › **Add to Home
+   Screen**.
+3. Open OpenPad from the Home Screen › **Connect to computer** › scan the QR
+   code. No camera? Enter the address and 6-digit PIN shown under the code.
 
 After that the app opens with no Wi-Fi at all, and syncs whenever the iPad and
-computer are on the same network.
+computer are on the same network. If the computer's address changes, the app
+tries its `.local` name, so you rarely need to connect again.
 
 ### Notebooks, sections and pages
 
@@ -230,8 +228,9 @@ By default the links only work on your Wi-Fi. For people elsewhere, switch on
 **Internet link** (needs cloudflared). OpenPad then opens a free Cloudflare
 quick tunnel for as long as it's on, and gives you a `trycloudflare.com` link.
 That traffic is encrypted, but it passes through Cloudflare. Only guest pages
-are reachable through it. **New links** disconnects everyone and invalidates
-old links.
+are reachable through it. Links last until OpenPad stops; **New links**
+disconnects everyone sooner. When nothing is open on the iPad, guests see a
+waiting screen, never one of your other notebooks.
 
 ### Sync to the computer
 

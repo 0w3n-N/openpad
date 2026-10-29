@@ -3,7 +3,9 @@
 
 import { COLORS, buildPDF, drawStroke, pdfInfo, pdfName, savePDF, shapePressure } from './ink.js';
 import { Editor } from './editor.js';
-import { Link, Sync, importAsset, localBackgrounds, socket } from './link.js';
+import { ConnectError, Link, Sync, importAsset, localBackgrounds, socket } from './link.js';
+import { cameraAvailable, scan } from './scan.js';
+import { fitToolbar } from './ui.js';
 import { blankPage, digest, mergeInto, newId, newNotebook, normalize, now, order, sectionOf } from './model.js';
 import * as store from './store.js';
 
@@ -41,22 +43,19 @@ let cast = localStorage.getItem('openpad.cast') !== '0';
 const backgrounds = localBackgrounds(() => link);
 store.persist();
 
-// Clean the key out of the address bar on the computer's own page (it stays
-// in localStorage-free IndexedDB). Keep it if the page might be added to the
-// Home Screen, which needs the full link.
-if (link && location.search.includes('k=') && !navigator.standalone) {
-  /* leave the URL alone: Add to Home Screen uses it */
-}
+// Running from the computer in Safari (not the installed app)?
+const fromComputer = !!link && link.base === location.origin && location.protocol === 'http:';
+const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 
 function setPill(state, detail = '') {
   const pill = $('#pcpill');
   pill.dataset.state = state;
   const name = link?.name || (link ? new URL(link.base).hostname : '');
   $('#pctext').textContent =
-    !link ? 'This iPad only · Pair' :
+    !link ? 'Connect to computer' :
     state === 'syncing' ? 'Syncing…' :
     state === 'ok' ? `Synced with ${name}` :
-    state === 'unpaired' ? 'Pairing expired · Pair again' :
+    state === 'unpaired' ? 'Key changed · Connect again' :
     `Offline · ${name}`;
   pill.title = detail || '';
 }
@@ -78,7 +77,8 @@ function startLink() {
     },
   });
   sync.run();
-  ws = socket(link.wsURL('pad'), { status: onSocket, message: onMessage, frame: (b) => editor.surface.pushFrame(b) });
+  ws = socket(() => link.wsURL('pad'), { status: onSocket, message: onMessage, frame: (b) => editor.surface.pushFrame(b) });
+  syncBanner();
 }
 
 function useTheme() {
@@ -128,8 +128,10 @@ function onMessage(msg) {
     syncLiveBadge();
     if (!current || !cast) return;
     if (msg.nb.id !== current.id) {
+      // Another device put something else on screen. Don't take it back
+      // automatically (two devices would keep swapping); the Live badge does.
       live.ready = false;
-      return castCurrent();
+      return syncLiveBadge();
     }
     live.ready = true;
     syncLiveBadge();
@@ -184,8 +186,10 @@ function syncLiveBadge() {
   b.hidden = !link;
   b.classList.toggle('on', on);
   const n = (live.peers.views || 0) + (live.peers.guests || 0);
-  $('#livecount').textContent = on ? (live.peers.guests ? `${live.peers.guests} guest${live.peers.guests > 1 ? 's' : ''}` : 'Live') : ws?.connected ? 'Not shown' : 'Offline';
-  b.title = on ? `Shown on the computer${n ? ` (${live.peers.views} window${live.peers.views === 1 ? '' : 's'}, ${live.peers.guests} guests)` : ''}` : 'Not shown on the computer';
+  $('#livecount').textContent = on ? (live.peers.guests ? `Live · ${live.peers.guests} guest${live.peers.guests > 1 ? 's' : ''}` : 'Live')
+    : !ws?.connected ? 'Offline' : cast ? 'Show' : 'Hidden';
+  b.title = on ? `Shown on the computer${n ? ` (${live.peers.views} window${live.peers.views === 1 ? '' : 's'}, ${live.peers.guests} guests)` : ''}. Tap to invite people.`
+    : !ws?.connected ? 'The computer is not reachable' : 'Not shown on the computer. Tap to show it.';
   $('#m-live').hidden = !link;
   $('#m-cast').checked = cast;
 }
@@ -199,6 +203,8 @@ async function renderLibrary() {
   const books = $('#books');
   books.replaceChildren();
   $('#empty').hidden = list.length > 0;
+  $('#e-connect').hidden = !!link;
+  $('#e-hint').hidden = !!link;
   for (const n of list) {
     const card = document.createElement('div');
     card.className = 'book';
@@ -473,7 +479,7 @@ function thumb(c, page) {
   ctx.fillRect(0, 0, w, page.h * k);
   const draw = () => {
     const img = backgrounds.get(page, 400, () => c.isConnected && draw());
-    if (img) ctx.drawImage(img, 0, 0, w, page.h * k);
+    if (img?.width) ctx.drawImage(img, 0, 0, w, page.h * k);
     for (const s of page.strokes) drawStroke(ctx, s, k);
   };
   draw();
@@ -563,9 +569,10 @@ function openSettings() {
   $('#doubletap').checked = settings.doubleTap;
   $('#fingerdraw').checked = settings.fingerDraw;
   $('#pcinfo').textContent = link
-    ? `Paired with ${link.name || new URL(link.base).host}. Notebooks sync whenever you're on the same network; readable PDFs go to the computer's Documents/OpenPad folder.`
-    : 'Not paired. Notebooks stay on this iPad until you pair it with a computer running OpenPad.';
-  $('#unpairbtn').hidden = !link;
+    ? `Connected to ${link.name || new URL(link.base).host}. Notebooks sync whenever you're on the same network; readable PDFs go to the computer's Documents/OpenPad folder.`
+    : 'Not connected. Notebooks stay on this iPad until you connect it to a computer running OpenPad.';
+  $('#unpairbtn').hidden = !link || fromComputer;
+  $('#pairbtn').textContent = link ? 'Connect to another computer…' : 'Connect to a computer…';
   $('#syncbtn').hidden = !link;
   store.usage().then((u) => {
     if (u) $('#storage').textContent = `Using ${(u.usage / 1048576).toFixed(1)} MB on this device.`;
@@ -602,6 +609,12 @@ $('#pairbtn').onclick = () => {
   $('#settings').close();
   openPair();
 };
+$('#e-new').onclick = () => createNotebook();
+$('#e-import').onclick = () => {
+  importTarget = 'library';
+  $('#file').click();
+};
+$('#e-connect').onclick = () => openPair();
 $('#syncbtn').onclick = () => sync?.run().then(() => sync.flushPDFs()).then(() => toast('Synced'));
 $('#unpairbtn').onclick = async () => {
   await store.kvSet('pc', null);
@@ -609,34 +622,104 @@ $('#unpairbtn').onclick = async () => {
   ws = null;
   sync = null;
   link = null;
+  live.ready = false;
   setPill('none');
   $('#settings').close();
   syncLiveBadge();
   toast('This iPad forgot the computer. Your notebooks stay here.');
 };
 
+let scanner = null;
+let lastCode = null; // {host, key} from the last scan, for "Try again"
+
 function openPair() {
-  if (location.protocol === 'http:' && !link) {
-    return toast('Open OpenPad on the computer and scan its QR code with the iPad camera.', 6000);
-  }
+  closePops();
+  const dlg = $('#pairdlg');
   $('#pairerr').hidden = true;
-  $('#pairdlg').showModal();
+  $('#certhelp').hidden = true;
+  $('#manual').open = !cameraAvailable();
+  dlg.showModal();
+  startScan();
+  dlg.onclose = () => scanner?.stop();
 }
-$('#pairgo').onclick = async (e) => {
-  e.preventDefault();
+
+function startScan() {
+  scanner?.stop();
+  if (!cameraAvailable()) {
+    $('#scanbox').hidden = true;
+    $('#scanmsg').textContent = location.protocol === 'http:'
+      ? 'Scan the QR code with the Camera app instead, or enter the address and PIN below.'
+      : 'The camera is not available. Enter the address and PIN below.';
+    return;
+  }
+  $('#scanbox').hidden = false;
+  $('#scanmsg').textContent = 'Point the camera at the QR code on your computer.';
+  scanner = scan($('#scanvideo'), (text) => !!Link.parseCode(text));
+  scanner.done.then((text) => {
+    if (!text) return;
+    lastCode = Link.parseCode(text);
+    finishConnect(() => Link.connect(lastCode.host, lastCode.key));
+  }, (e) => {
+    $('#scanbox').hidden = true;
+    $('#manual').open = true;
+    $('#scanmsg').textContent = e.name === 'NotAllowedError'
+      ? 'Camera access was declined. Allow it in Settings › Safari › Camera, or enter the address and PIN below.'
+      : 'The camera could not start. Enter the address and PIN below.';
+  });
+}
+
+async function finishConnect(attempt) {
   $('#pairerr').hidden = true;
+  $('#certhelp').hidden = true;
+  $('#scanmsg').textContent = 'Connecting…';
   $('#pairgo').disabled = true;
   try {
-    link = await Link.pair($('#pairaddr').value, $('#pairpin').value);
+    const next = await attempt();
+    ws?.close();
+    link = next;
     $('#pairdlg').close();
-    toast(`Paired with ${link.name || 'your computer'}. Syncing…`);
+    toast(`Connected to ${link.name || 'your computer'}. Syncing…`);
     startLink();
+    if (current) castCurrent();
   } catch (err) {
-    $('#pairerr').textContent = err.message;
-    $('#pairerr').hidden = false;
+    $('#scanbox').hidden = true;
+    $('#scanmsg').textContent = '';
+    if (err instanceof ConnectError && err.setupURL) {
+      $('#certlink').href = err.setupURL;
+      $('#certhelp').hidden = false;
+    } else {
+      $('#pairerr').textContent = err.message;
+      $('#pairerr').hidden = false;
+    }
   } finally {
     $('#pairgo').disabled = false;
   }
+}
+
+$('#pairgo').onclick = () => {
+  lastCode = null;
+  finishConnect(() => Link.pair($('#pairaddr').value, $('#pairpin').value));
+};
+$('#retrybtn').onclick = () => {
+  if (lastCode) finishConnect(() => Link.connect(lastCode.host, lastCode.key));
+  else startScan();
+};
+
+// In Safari from the computer's QR code: offer the installed app.
+function syncBanner() {
+  const touch = navigator.maxTouchPoints > 1; // iPads, even with a trackpad attached
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem('openpad.banner') === '0';
+  } catch {}
+  $('#banner').hidden = !(fromComputer && touch && !standalone && !dismissed);
+  if (link) $('#bannergo').href = link.setupURL();
+}
+$('#bannerx').onclick = () => {
+  try {
+    localStorage.setItem('openpad.banner', '0');
+  } catch {}
+  $('#banner').hidden = true;
 };
 
 // ---------------------------------------------------------------- invite
@@ -704,6 +787,7 @@ for (const c of COLORS) {
   b.title = c;
   b.onclick = () => {
     editor.color = c;
+    $('#stylebtn').style.setProperty('--c', c);
     $$('#colors button').forEach((x) => x.classList.toggle('on', x === b));
     if (editor.tool === 'eraser' || editor.tool === 'lasso') {
       if (editor.selection) return editor.selectionAction('color', c);
@@ -761,7 +845,15 @@ $('#s-addsec').onclick = async () => {
   if (title) editor.addSection(title.slice(0, 80));
   renderSide();
 };
-$('#livebadge').onclick = () => openInvite();
+$('#livebadge').onclick = () => {
+  if (live.ready && cast) return openInvite();
+  if (!ws?.connected) return toast(`Can't reach ${link?.name || 'the computer'}. Check that OpenPad is on and both are on the same Wi-Fi.`, 4000);
+  if (!cast) {
+    cast = true;
+    localStorage.setItem('openpad.cast', '1');
+  }
+  castCurrent();
+};
 
 function togglePop(sel) {
   const el = $(sel);
@@ -772,13 +864,14 @@ function togglePop(sel) {
 function closePops() {
   $('#menu').hidden = true;
   $('#shapes').hidden = true;
+  $('#stylepop').hidden = true;
 }
 $('#menubtn').onclick = (e) => {
   e.stopPropagation();
   togglePop('#menu');
 };
 document.addEventListener('pointerdown', (e) => {
-  if (!e.target.closest('#menu, #menubtn, #shapes, #shapebtn')) closePops();
+  if (!e.target.closest('#menu, #menubtn, #shapes, #shapebtn, #stylepop, #stylebtn')) closePops();
 });
 
 $('#m-import').onclick = () => {
@@ -892,6 +985,15 @@ setInterval(() => {
 
 // The installed app works offline: cache its files.
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+
+// Double-tapping a button must not zoom the page (iPad Safari).
+document.addEventListener('dblclick', (e) => e.preventDefault());
+$('#stylebtn').style.setProperty('--c', editor.color);
+fitToolbar({
+  button: $('#stylebtn'),
+  pop: $('#stylepop'),
+  levels: [[700, [$('#tools')]], [1150, [$('#colors'), $('#widths')]]],
+});
 
 editor.syncUndo();
 renderLibrary();

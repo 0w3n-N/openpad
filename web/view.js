@@ -2,7 +2,7 @@
 // Opened by the computer (bar icon or `openpad`), never by a link.
 
 import { Backgrounds, Surface, buildPDF, pdfInfo, pdfName, savePDF } from './ink.js';
-import { socket } from './link.js';
+import { PROTOCOL, socket } from './link.js';
 import { applyOp, indexStrokes, mergeInto, normalize, order, sectionOf, sha256Hex } from './model.js';
 
 const $ = (s) => document.querySelector(s);
@@ -68,6 +68,7 @@ let nb = null;
 let idx = new Map();
 let pid = null;
 let pads = 0;
+let placeholder = false; // nothing on screen yet
 let pairForced = null; // null = automatic, true/false = user toggled
 let cursor = null; // {page, x, y}
 
@@ -99,7 +100,7 @@ function liveNotice(msg) {
     stopped: 'Stopped. The last frame stays on the page.', error: msg.error || 'Window capture stopped' }[msg.reason] || '';
 }
 
-const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=view&${K}`, {
+const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=view&v=${PROTOCOL}&${K}`, {
   status(ok) {
     $('#status').className = ok ? 'ok' : 'bad';
     $('#status').title = ok ? 'Connected' : 'Reconnecting…';
@@ -125,7 +126,8 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       idx = indexStrokes(nb);
       pid = msg.page || order(nb)[0];
       pads = msg.pads;
-      document.title = `${nb.title} · OpenPad`;
+      placeholder = !!msg.placeholder;
+      document.title = placeholder ? 'OpenPad' : `${nb.title} · OpenPad`;
       showPage(!samePage);
       syncGuests(msg.guests);
       return syncPair();
@@ -170,6 +172,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
     if (msg.t === 'end') {
       const e = idx.get(msg.id);
       if (e && surface.active.has(msg.id)) surface.commit(e[0]);
+      else if (e && e[1].id === pid) surface.drawInk(); // started before a refresh
     }
     if ((msg.t === 'remove' || msg.t === 'restore') && onPage) surface.drawInk();
     if (msg.t !== 'pts') syncPair();
@@ -353,10 +356,9 @@ async function loadInfo(force = false) {
   try {
     const info = await (await api('/api/info')).json();
     const url = info.urls[0];
-    $('#url').textContent = url || 'No Wi-Fi address found. Connect to a network, then restart OpenPad.';
     $('#qr').hidden = !url;
     if (url) $('#qr').src = `/api/qr.svg?${K}&for=app&t=${Date.now()}`;
-    $('#setupqr').src = `/api/qr.svg?${K}&for=setup&t=${Date.now()}`;
+    else toast('No Wi-Fi address found. Connect to a network, then restart OpenPad.', 6000);
     const p = await (await api('/api/pairing')).json();
     $('#pinaddr').textContent = p.addresses[0] || '—';
     $('#pincode').textContent = p.pin;
@@ -365,16 +367,11 @@ async function loadInfo(force = false) {
 }
 
 function syncPair() {
-  const empty = nb && Object.values(nb.pages).every((p) => !p.strokes.length && !p.bg) && order(nb).length <= 1;
+  const empty = placeholder || (nb && Object.values(nb.pages).every((p) => !p.strokes.length && !p.bg) && order(nb).length <= 1);
   const show = pairForced ?? (pads === 0 && empty);
   $('#pair').hidden = !show;
   if (show) loadInfo();
 }
-$$('#pairtabs button').forEach((b) => (b.onclick = () => {
-  $$('#pairtabs button').forEach((x) => x.classList.toggle('on', x === b));
-  $$('[data-pane]').forEach((p) => (p.hidden = p.dataset.pane !== b.dataset.tab));
-  loadInfo(true);
-}));
 setInterval(() => !$('#pair').hidden && loadInfo(true), 30000); // the PIN changes every 10 minutes
 
 // ---------------------------------------------------------------- guests

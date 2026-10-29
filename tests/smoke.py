@@ -89,18 +89,18 @@ r = run("status", "--json")
 check("openpad status", r.returncode == 0 and json.loads(r.stdout).get("running") is True, r.stdout + r.stderr)
 
 r = run("url")
-check("openpad url prints the link and a QR code", r.returncode == 0 and "/?k=" in r.stdout and "▀" in r.stdout,
+check("openpad url prints the link and a QR code", r.returncode == 0 and "/app?k=" in r.stdout and "▀" in r.stdout,
       r.stdout[-300:] + r.stderr[-300:])
 
 # HTTP + WebSocket like the iPad
-with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/?k={key}", timeout=5) as resp:
+with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/app?k={key}", timeout=5) as resp:
     check("notes app served", resp.status == 200 and b"app.js" in resp.read())
 with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/qr.svg?k={key}", timeout=5) as resp:
     check("QR image served", resp.read().startswith(b"<svg"))
 
 s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
 k = base64.b64encode(os.urandom(16)).decode()
-s.sendall(f"GET /ws?role=pad&k={key} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nUpgrade: websocket\r\n"
+s.sendall(f"GET /ws?role=pad&v=5&k={key} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nUpgrade: websocket\r\n"
           f"Connection: Upgrade\r\nSec-WebSocket-Key: {k}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
 buf = b""
 while b"\r\n\r\n" not in buf:

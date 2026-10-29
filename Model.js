@@ -33,7 +33,7 @@ function parseStatus(raw, nowSec) {
     }
   }
   var url = singleLine(s.url, 300)
-  if (!/^http:\/\/[A-Za-z0-9.\-\[\]:]+\/\?k=[A-Za-z0-9_-]+$/.test(url)) url = ""
+  if (!/^http:\/\/[A-Za-z0-9.\-\[\]:]+\/(app)?\?k=[A-Za-z0-9_-]+$/.test(url)) url = ""
   return {
     running: s.running === true && fresh,
     pads: toInt(s.pads, 0, 99, 0),

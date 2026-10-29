@@ -32,9 +32,16 @@ jobs:
         run: |
           mkdir -p _site/vendor/pdfjs
           cp web/app.html _site/index.html
-          cp web/app.html web/app.js web/editor.js web/ink.js web/link.js web/model.js web/store.js \
-             web/style.css web/sw.js web/manifest.webmanifest web/icon.svg web/icon.png _site/
+          mkdir -p _site/vendor/jsqr
+          cp web/app.html web/app.js web/editor.js web/ink.js web/link.js web/model.js web/scan.js web/store.js \
+             web/ui.js web/style.css web/sw.js web/manifest.webmanifest web/icon.svg web/icon.png _site/
           cp web/vendor/pdfjs/pdf.min.mjs web/vendor/pdfjs/pdf.worker.min.mjs web/vendor/pdfjs/LICENSE _site/vendor/pdfjs/
+          cp web/vendor/jsqr/jsqr.js web/vendor/jsqr/LICENSE _site/vendor/jsqr/
+          # A new cache version per deploy: the app updates all its files at once.
+          sed -i "s/const VERSION = 'openpad-dev';/const VERSION = 'openpad-${GITHUB_SHA::12}';/" _site/sw.js
+          grep -q "openpad-${GITHUB_SHA::12}" _site/sw.js
+          # Every file the service worker caches must be published.
+          for f in $(grep -oE "'[a-z0-9./_-]+\.(js|mjs|css|svg|png|html|webmanifest)'" _site/sw.js | tr -d "'"); do test -f "_site/$f"; done
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:

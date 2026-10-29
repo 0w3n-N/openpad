@@ -4,7 +4,8 @@
 
 import { Backgrounds, COLORS, buildPDF, pdfName, savePDF } from './ink.js';
 import { Editor } from './editor.js';
-import { socket } from './link.js';
+import { PROTOCOL, socket } from './link.js';
+import { fitToolbar } from './ui.js';
 import { mergeInto, newId, normalize, order, sectionOf } from './model.js';
 
 const $ = (s) => document.querySelector(s);
@@ -71,7 +72,7 @@ editor.syncUndo = () => {
 };
 editor.onzoom = (z) => ($('#fitbtn').hidden = !z);
 
-const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?${q}&me=${encodeURIComponent(me)}`, {
+const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?${q}&v=${PROTOCOL}&me=${encodeURIComponent(me)}`, {
   status(ok) {
     $('#dot').className = ok ? 'ok' : 'bad';
   },
@@ -87,6 +88,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       editor.by = msg.by;
       document.body.classList.toggle('viewonly', !canWrite);
       presenterPage = msg.page;
+      $('#waiting').hidden = !msg.placeholder;
       const fresh = normalize(msg.nb);
       if (nb && nb.id === fresh.id) {
         mergeInto(nb, fresh);
@@ -96,7 +98,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
         editor.setNotebook(nb, msg.page);
       }
       if (follow && msg.page && msg.page !== editor.pid) editor.show(msg.page, true);
-      document.title = `${nb.title} · OpenPad`;
+      document.title = msg.placeholder ? 'OpenPad · live notes' : `${nb.title} · OpenPad`;
       return renderPager();
     }
     if (!nb) return;
@@ -152,6 +154,7 @@ for (const c of COLORS) {
   b.style.setProperty('--c', c);
   b.onclick = () => {
     editor.color = c;
+    $('#stylebtn').style.setProperty('--c', c);
     $$('#colors button').forEach((x) => x.classList.toggle('on', x === b));
     if (editor.tool === 'eraser' || editor.tool === 'hand') setTool('pen');
   };
@@ -172,7 +175,7 @@ $('#prev').onclick = () => editor.goto(-1);
 $('#next').onclick = () => editor.goto(1);
 $('#followbtn').onclick = () => setFollow(!follow);
 $('#fitbtn').onclick = () => editor.show(editor.pid, true);
-$('#savehint').textContent = matchMedia('(pointer: coarse)').matches
+$('#savehint').textContent = navigator.maxTouchPoints > 1
   ? 'On an iPad or phone, choose Save to Files and pick a folder.'
   : window.showSaveFilePicker ? 'You choose the folder and file name next.' : 'It goes to your Downloads folder (or wherever your browser asks).';
 
@@ -211,5 +214,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 if (!canWrite) setTool('hand');
+document.addEventListener('dblclick', (e) => e.preventDefault());
+$('#stylebtn').style.setProperty('--c', editor.color);
+fitToolbar({
+  button: $('#stylebtn'),
+  pop: $('#stylepop'),
+  levels: [[640, [$('#tools'), $('#undogroup')]], [1000, [$('#colors'), $('#widths')]]],
+});
 editor.syncUndo();
 editor.layout();

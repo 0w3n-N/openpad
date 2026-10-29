@@ -50,6 +50,12 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 # The installed (offline) app. Owner requests from it are allowed cross-origin.
 APP_ORIGIN = "https://0w3n-n.github.io"
 APP_URL = APP_ORIGIN + "/openpad/"
+# Clients send ?v= on their WebSocket. Pages from before 0.5.1 don't, and are
+# told to reload (an old tab can stay open in Safari for weeks).
+PROTOCOL = 5
+# Shown when no notebook is on screen: at first start, and after the one on
+# screen is deleted. Never stored, and read-only.
+PLACEHOLDER = "nothing-shown"
 
 # Limits. Generous for real use, small enough that a misbehaving client can't
 # exhaust memory, disk, or threads.
@@ -313,15 +319,35 @@ class Hub:
         for nid in (migrated, last.get("nb") if isinstance(last, dict) else None):
             nb = nb or (self.store.get(nid) if nid else None)
         if not nb:
-            recent = sorted(self.store.summaries(), key=lambda s: -s["t"])
-            nb = self.store.get(recent[0]["id"]) if recent else None
-        if not nb:
-            nb = self.store.put(N.new_notebook("Board", "wide", "Board", "grid"))
+            # Never fall back to some other notebook: guests would see it.
+            return self._show_nothing()
         self._set(nb, last.get("page") if isinstance(last, dict) else None)
         # A window that was live when the server stopped is gone now.
         for p in nb["pages"].values():
             if p["bg"] and p["bg"].get("live"):
                 p["bg"], p["t"] = None, N.now_ms()
+                self._changed()
+
+    @property
+    def placeholder(self):
+        return self.nb["id"] == PLACEHOLDER
+
+    def _show_nothing(self):
+        nb = N.new_notebook("Nothing shown yet", "wide", "", "blank")
+        nb["id"] = PLACEHOLDER
+        self.nb = nb
+        self.page = N.order(nb)[0]
+        self._index()
+        write_private(self.data / "live.json", json.dumps({"nb": None}))
+
+    def _fresh(self, title, section_title, pages, sec):
+        """A new notebook (when there's nothing on screen to add pages to)."""
+        t = N.now_ms()
+        nb = N.finish({"v": 1, "id": N.new_id(), "title": title, "size": "wide", "metaT": t, "created": t,
+                       "layout": {"t": t, "sections": [{"id": sec, "title": section_title, "pages": list(pages)}]},
+                       "goneP": [], "pages": dict(pages)})
+        self._set(self.store.put(nb), next(iter(pages)))
+        return self.nb
 
     def _set(self, nb, page=None):
         self.nb = nb
@@ -353,9 +379,7 @@ class Hub:
         with self.lock:
             if self.nb and self.nb["id"] == nid:
                 self.live_stop()
-                recent = sorted(self.store.summaries(), key=lambda s: -s["t"])
-                nb = self.store.get(recent[0]["id"]) if recent else None
-                self._set(nb or self.store.put(N.new_notebook("Board", "wide", "Board", "grid")))
+                self._show_nothing()
                 self.send_state()
 
     def guest_assets(self):
@@ -370,8 +394,9 @@ class Hub:
                 "guests": sum(c.role == "guest" for c in self.conns)}
 
     def _state(self, conn):
-        return {"t": "state", "nb": self.nb, "page": self.page, "live": self.live, "capture": self.capture_mode(),
-                "you": conn.id, "role": conn.role, "write": conn.write, "by": conn.by, **self.peers()}
+        return {"t": "state", "nb": self.nb, "page": self.page, "placeholder": self.placeholder, "live": self.live,
+                "capture": self.capture_mode(), "you": conn.id, "role": conn.role, "write": conn.write, "by": conn.by,
+                **self.peers()}
 
     def join(self, conn) -> bool:
         with self.lock:
@@ -426,6 +451,8 @@ class Hub:
         t = msg.get("t")
         with self.lock:
             nb = self.nb
+            if self.placeholder and t in ("begin", "pts", "end", "remove", "restore", "merge", "clearguests"):
+                return  # nothing to draw on: the iPad opens a notebook first
             page = nb["pages"].get(msg.get("page")) if isinstance(msg.get("page"), str) else None
             out = None
             if t == "begin" and page and conn.write:
@@ -556,10 +583,13 @@ class Hub:
             pages[p["id"]] = p
         if not pages:
             return
+        title = N.clean_text(msg.get("name"), "PDF", 80).removesuffix(".pdf") or "PDF"
+        if self.placeholder:
+            self._fresh(title, title, pages, sec)
+            return self.send_state()
         layout = [dict(s, pages=list(s["pages"])) for s in self.nb["layout"]["sections"]]
         cur = next((i for i, s in enumerate(layout) if self.page in s["pages"]), len(layout) - 1)
-        layout.insert(cur + 1, {"id": sec, "title": N.clean_text(msg.get("name"), "PDF", 80).removesuffix(".pdf"),
-                                "pages": list(pages)})
+        layout.insert(cur + 1, {"id": sec, "title": title, "pages": list(pages)})
         self.store.put({**self.nb, "layout": {"t": t, "sections": layout}, "pages": {**self.nb["pages"], **pages}})
         self._index()
         self.page = next(iter(pages))
@@ -626,14 +656,20 @@ class Hub:
                 self.live_stop()
                 return
             t = N.now_ms()
-            layout = [dict(s, pages=list(s["pages"])) for s in self.nb["layout"]["sections"]]
-            sec = next((s for s in layout if self.page in s["pages"]), layout[-1])
-            p = N.blank_page(sec["id"], "wide", "blank", t)
+            sec_id = N.new_id()
+            if not self.placeholder:
+                layout = [dict(s, pages=list(s["pages"])) for s in self.nb["layout"]["sections"]]
+                sec_id = next((s for s in layout if self.page in s["pages"]), layout[-1])["id"]
+            p = N.blank_page(sec_id, "wide", "blank", t)
             p.update({"h": round(N.PAGE_W * h / w, 2), "pt": [round(w * 0.75, 2), round(h * 0.75, 2)], "bg": {"live": True}})
-            at = sec["pages"].index(self.page) + 1 if self.page in sec["pages"] else len(sec["pages"])
-            sec["pages"].insert(at, p["id"])
-            self.store.put({**self.nb, "layout": {"t": t, "sections": layout}, "pages": {**self.nb["pages"], p["id"]: p}})
-            self._index()
+            if self.placeholder:
+                self._fresh("Window notes", "Windows", {p["id"]: p}, sec_id)
+            else:
+                sec = next(s for s in layout if s["id"] == sec_id)
+                at = sec["pages"].index(self.page) + 1 if self.page in sec["pages"] else len(sec["pages"])
+                sec["pages"].insert(at, p["id"])
+                self.store.put({**self.nb, "layout": {"t": t, "sections": layout}, "pages": {**self.nb["pages"], p["id"]: p}})
+                self._index()
             self.page = p["id"]
             self.live = {"state": "live", "page": p["id"]}
         self.send_state()
@@ -661,7 +697,7 @@ class Hub:
     def _live_resized(self, w, h):
         with self.lock:
             page = self.nb["pages"].get(self.live["page"])
-            if not page:
+            if not page or self.placeholder:
                 return
             page["h"] = round(N.PAGE_W * h / w, 2)
             page["pt"] = [round(w * 0.75, 2), round(h * 0.75, 2)]
@@ -671,7 +707,7 @@ class Hub:
 
     def _live_ended(self, reason):
         with self.lock:
-            page = self.nb["pages"].get(self.live["page"])
+            page = self.nb["pages"].get(self.live["page"]) if not self.placeholder else None
             if page:
                 # The last frame stays on the page, as an image every device syncs.
                 page["bg"] = {"img": self.store.add_asset_bytes(self.frame)} if self.frame else None
@@ -695,14 +731,9 @@ class Guests:
     """Two revocable links: "w" lets guests draw, "v" only lets them watch."""
 
     def __init__(self, store: Path):
+        # Links last one session: a link sent last week shouldn't still work.
         self.file = store / "guests.json"
-        try:
-            data = json.loads(self.file.read_text())
-            self.tokens = {k: data[k] for k in ("w", "v") if re.fullmatch(r"[A-Za-z0-9_-]{22,64}", str(data.get(k)))}
-        except (OSError, ValueError, AttributeError):
-            self.tokens = {}
-        if len(self.tokens) != 2:
-            self.rotate()
+        self.rotate()
 
     def rotate(self):
         self.tokens = {"w": secrets.token_urlsafe(16), "v": secrets.token_urlsafe(16)}
@@ -845,8 +876,12 @@ class Handler(BaseHTTPRequestHandler):
                "font-src 'self' data: blob:; worker-src 'self' blob:; manifest-src 'self'; "
                f"connect-src 'self' ws://{host} wss://{host}; base-uri 'none'; form-action 'none'; "
                "frame-ancestors 'none'")
-        self._send(200, (WEB_DIR / name).read_bytes(), "text/html; charset=utf-8",
-                   {"Content-Security-Policy": csp})
+        body = (WEB_DIR / name).read_bytes()
+        if name == "app.html":
+            # The web manifest is for the installed copy on GitHub Pages. Without
+            # it, "Add to Home Screen" here keeps the page's own address (and key).
+            body = body.replace(b'<link rel="manifest" href="manifest.webmanifest">\n', b"")
+        self._send(200, body, "text/html; charset=utf-8", {"Content-Security-Policy": csp})
 
     # ------------------------------------------------------------- routing
 
@@ -923,7 +958,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, qr.svg(url, border=1).encode(), "image/svg+xml") if url else self._deny(404, "no link")
         if path == "/api/pairing":
             pin, left = self.app.pairing.current()
-            return self._json({"pin": pin, "expires": left, "addresses": self.app.addresses(),
+            return self._json({"pin": pin, "expires": left, "addresses": self.app.addresses(), "name": socket.gethostname(),
                                "fingerprint": self.app.ca.fingerprint(), "app": APP_URL})
         if path == "/api/ca.crt":
             return self._send(200, self.app.ca.ca_der, "application/x-x509-ca-cert",
@@ -1148,6 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
         key = self.headers.get("Sec-WebSocket-Key")
         if not key or "websocket" not in self.headers.get("Upgrade", "").lower():
             return self._deny(400, "expected websocket")
+        legacy = (q.get("v") or [""])[0] != str(PROTOCOL)
         if owner:
             role, write, by = ("pad" if (q.get("role") or [""])[0] == "pad" else "view"), True, None
         else:
@@ -1166,6 +1202,15 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass  # a socketpair behind the TLS layer
         self.connection.settimeout(WS_TIMEOUT)  # server pings keep live peers inside this
+        if legacy:
+            # A page from an older version (still open in a tab): it shows this
+            # as a notice, then keeps reconnecting and showing it until reloaded.
+            note = {"t": "live", "state": "error", "error": "OpenPad was updated. Reload this page to get the new version."}
+            try:
+                self.connection.sendall(WSConn._frame(0x1, json.dumps(note).encode()) + WSConn._frame(0x8, b""))
+            except OSError:
+                pass
+            return
         conn = WSConn(self.connection, self.rfile, role, write, by)
         hub = self.app.hub
         if not hub.join(conn):
@@ -1405,7 +1450,7 @@ class OpenPadServer(ThreadingHTTPServer):
     def link(self, which):
         hosts = [self.public_host] if self.public_host else self._lan
         if which == "app":
-            return f"http://{hosts[0]}:{self.port}/?k={self.token}" if hosts else None
+            return f"http://{hosts[0]}:{self.port}/app?k={self.token}" if hosts else None
         if which == "setup":
             return f"http://{hosts[0]}:{self.port}/setup?k={self.token}" if hosts else None
         if which in ("w", "v"):
@@ -1416,7 +1461,7 @@ class OpenPadServer(ThreadingHTTPServer):
 
     def pad_urls(self):
         hosts = [self.public_host] if self.public_host else self._lan
-        return [f"http://{h}:{self.port}/?k={self.token}" for h in hosts]
+        return [f"http://{h}:{self.port}/app?k={self.token}" for h in hosts]
 
     def info(self):
         return {"urls": self.pad_urls(), "version": __version__, "setup": self.link("setup"), "app": APP_URL,
@@ -1452,7 +1497,7 @@ class OpenPadServer(ThreadingHTTPServer):
         with self.hub.lock:
             order = N.order(self.hub.nb)
             page = order.index(self.hub.page) if self.hub.page in order else 0
-            title = self.hub.nb["title"]
+            title = "" if self.hub.placeholder else self.hub.nb["title"]
         status = {"app": "openpad", "version": __version__, "running": running, "pid": os.getpid(),
                   "port": self.port, "url": url, "qr": qr_matrix(url) if url and running else [],
                   "pads": peers["pads"] if running else 0, "views": peers["views"] if running else 0,

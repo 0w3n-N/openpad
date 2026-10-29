@@ -13,27 +13,14 @@
 <section id="pair" class="overlay" hidden>
   <div class="card wide">
     <img class="logo" src="icon.svg" alt="">
-    <h1>OpenPad</h1>
-    <div class="seg" id="pairtabs">
-      <button data-tab="quick" class="on">Use in Safari</button>
-      <button data-tab="install">Install the iPad app</button>
-    </div>
-    <div data-pane="quick">
-      <p>Scan this with the iPad Camera app (same Wi-Fi). Notebooks you write there are kept on this computer too.</p>
-      <img id="qr" class="qr" alt="QR code for the iPad link">
-      <code id="url"></code>
-    </div>
-    <div data-pane="install" hidden>
-      <p>The installed app works without this computer and syncs when you're back on this Wi-Fi. Takes about a minute, once:</p>
-      <ol class="steps">
-        <li>Scan this with the iPad Camera. It opens a setup page that installs OpenPad's certificate.</li>
-        <li>On that page, tap <b>Open the app</b>, then Share › <b>Add to Home Screen</b>.</li>
-        <li>Open OpenPad from the Home Screen › <b>Pair</b>, and enter:</li>
-      </ol>
-      <img id="setupqr" class="qr small" alt="QR code for the setup page">
-      <div class="pin"><span>Address</span><code id="pinaddr"></code><span>PIN</span><code id="pincode"></code></div>
-    </div>
-    <p class="small"><kbd>Q</kbd> show/hide · drop a PDF here to add it to this notebook</p>
+    <h1>Connect your iPad</h1>
+    <img id="qr" class="qr" alt="QR code for the iPad">
+    <ul class="ways">
+      <li><b>OpenPad app:</b> tap <b>Connect</b> and scan this code.</li>
+      <li><b>No app yet?</b> Scan it with the Camera app: OpenPad opens in Safari right away, and offers to install the app.</li>
+    </ul>
+    <p class="small">Or in the app, enter <code id="pinaddr"></code> with PIN <code id="pincode"></code></p>
+    <p class="small"><kbd>Q</kbd> show/hide · drop a PDF here to add it to the notebook on screen</p>
   </div>
 </section>
 

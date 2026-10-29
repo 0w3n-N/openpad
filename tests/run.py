@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import random
+import re
 import ssl
 import subprocess
 import os
@@ -121,6 +122,8 @@ class FakeCapture:
         on_end("stopped")
 
 
+from pathlib import Path  # noqa: E402
+
 import openpad.capture as capture  # noqa: E402
 
 capture.WindowCapture = FakeCapture
@@ -164,7 +167,9 @@ def http(method, path, headers=None, body=None, host=None):
     return code, hdrs, rest
 
 
-def ws(path, origin=None, host=None):
+def ws(path, origin=None, host=None, legacy=False):
+    if not legacy and path.startswith("/ws"):
+        path += ("&" if "?" in path else "?") + "v=5"  # the protocol version current clients send
     s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
     k = base64.b64encode(os.urandom(16)).decode()
     extra = f"Origin: {origin}\r\n" if origin else ""
@@ -381,6 +386,11 @@ check("owner requests from the app's origin work", code == 200 and h.get("access
 check("other origins get no CORS header", "access-control-allow-origin" not in http("GET", f"/api/sync?k={KEY}")[1])
 
 print("== pages and files")
+check("the QR code opens /app (a fresh address, not an old tab)", srv.pad_urls()[0].endswith(f"/app?k={KEY}") or not srv.pad_urls())
+app_page = http("GET", f"/app?k={KEY}")[2]
+check("the computer's copy has no web manifest, so Add to Home Screen keeps the key",
+      b"app.js" in app_page and b'rel="manifest"' not in app_page
+      and b'rel="manifest"' in open(os.path.join(ROOT, "web", "app.html"), "rb").read())
 code, h, page = http("GET", "/view")
 csp = h.get("content-security-policy", "")
 check("strict CSP", "script-src 'self'" in csp and "style-src 'self'" in csp and "frame-ancestors 'none'" in csp)
@@ -398,13 +408,27 @@ check("server header doesn't reveal Python", "python" not in http("GET", "/api/p
 # --------------------------------------------------------------------------- live session
 
 print("== live session: validation")
+old_page, code = ws(f"/ws?role=pad&k={KEY}", legacy=True)
+m = recv_until(old_page, "live")
+check("a page from an older version is told to reload", code == 101 and "Reload" in m.get("error", "") and closed(old_page), m)
 view, code = ws(f"/ws?role=view&k={KEY}", origin=f"http://127.0.0.1:{PORT}")
 check("ws with own Origin accepted", code == 101)
 st = recv_until(view, "state")
+check("nothing is on screen until a notebook is opened",
+      st["placeholder"] is True and st["nb"]["id"] == "nothing-shown" and st["role"] == "view")
+pad, _ = ws(f"/ws?role=pad&k={KEY}")
+recv_until(pad, "state")
+send(pad, {"t": "begin", "page": st["page"], "s": stroke("ph1")})
+time.sleep(0.3)
+check("nothing can be drawn on that placeholder", "ph1" not in srv.hub.strokes)
+board = nb_with(1, "Board")
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(board).encode())
+send(pad, {"t": "open", "id": board["id"]})
+st = recv_until(view, "state")
 live_nb = st["nb"]
 pid = st["page"]
-check("the live notebook is sent on join", pid in live_nb["pages"] and st["role"] == "view")
-pad, _ = ws(f"/ws?role=pad&k={KEY}")
+check("opening a notebook on the iPad puts it on screen", live_nb["id"] == board["id"] and not st["placeholder"]
+      and pid in live_nb["pages"])
 recv_until(pad, "state")
 sid = "e" + os.urandom(4).hex()
 send(pad, {"t": "begin", "page": pid, "s": {"id": sid, "color": "red;background:url(x)", "width": 1e9, "by": "gfake",
@@ -573,6 +597,9 @@ srv.tunnel.url, srv.tunnel.state = None, "off"
 check("the tunnel host is forgotten when it stops", http("GET", "/join", host=TH)[0] == 421)
 
 print("== pairing the installed app")
+info = json.loads(http("GET", f"/api/pairing?k={KEY}")[2])
+check("pairing info has the computer's name and its addresses", info.get("name") and isinstance(info.get("addresses"), list)
+      and re.fullmatch(r"\d{6}", info.get("pin", "")))
 pin, _ = srv.pairing.current()
 check("wrong PIN refused", http("POST", "/api/pair", {"Content-Type": "application/json"}, b'{"pin":"000000"}')[0] == 403
       if pin != "000000" else True)
@@ -663,6 +690,29 @@ recv_until(gw, "state")
 check("guests can now load that PDF", http("GET", f"/api/asset/{sha3}?g={W}")[0] == 200)
 gw.close()
 
+print("== deleting the notebook on screen")
+diary = nb_with(1, "Private diary")
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(diary).encode())
+gw, _ = ws(f"/ws?g={W}&me=erin1")
+recv_until(gw, "state")
+http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
+     json.dumps({"id": srv.hub.nb["id"], "t": N.now_ms()}).encode())
+st = recv_until(gw, "state")
+check("guests then see nothing, never another notebook",
+      st["placeholder"] is True and "Private diary" not in json.dumps(st) and srv.hub.guest_assets() == set())
+send(view, {"t": "addpdf", "sha": sha3, "name": "Slides.pdf", "sizes": [[960, 540]] * 2})
+st = recv_until(gw, "state")
+check("a PDF added with nothing on screen becomes its own notebook",
+      not st["placeholder"] and st["nb"]["title"] == "Slides" and len(N.order(st["nb"])) == 2
+      and srv.store.get(st["nb"]["id"]) is not None)
+gw.close()
+send(pad, {"t": "open", "id": "nothing-shown"})
+time.sleep(0.3)
+check("the placeholder can't be opened as a notebook", srv.hub.nb["id"] == st["nb"]["id"])
+http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
+     json.dumps({"id": srv.hub.nb["id"], "t": N.now_ms()}).encode())
+time.sleep(0.3)
+
 # --------------------------------------------------------------------------- desktop annotation
 
 print("== desktop annotation")
@@ -692,6 +742,8 @@ else:
     check("picker requested", seen["picking"])
     check("window goes live", seen["live"])
     check("live window becomes the current page", seen["page"] and seen["current"])
+    check("with nothing on screen, the window gets its own notebook", srv.hub.nb["title"] == "Window notes"
+          and N.order(srv.hub.nb) == [seen["page"]])
     check("JPEG frames streamed to the iPad", seen["frames"] >= 10 and seen["jpeg"], seen["frames"])
     time.sleep(0.5)
     status = json.load(open(os.path.join(RUN, "status.json")))
@@ -792,11 +844,29 @@ time.sleep(0.3)
 check("and the page keeps the last frame", (srv.hub.nb["pages"][pid_live]["bg"] or {}).get("img") == hashlib.sha256(jpeg).hexdigest())
 srv.hub._native = None
 
+print("== QR codes and guest links")
+from openpad import qr  # noqa: E402
+from openpad.server import Guests  # noqa: E402
+
+check("guest links are new every session", Guests(Path(DATA)).tokens != srv.guests.tokens)
+if shutil.which("node"):
+    # The iPad app reads the computer's code with jsQR: it must decode ours.
+    url = f"http://192.168.1.20:{PORT}/app?k={KEY}"
+    rows = qr.matrix(url, border=4)
+    js = ("const jsQR = require(process.argv[1]); const rows = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+          "const k = 6, n = rows.length * k, data = new Uint8ClampedArray(n * n * 4);"
+          "for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const v = rows[(y / k) | 0][(x / k) | 0] === '1' ? 0 : 255;"
+          "const i = (y * n + x) * 4; data[i] = data[i + 1] = data[i + 2] = v; data[i + 3] = 255; }"
+          "const r = jsQR(data, n, n); console.log(r ? r.data : '');")
+    r = subprocess.run(["node", "-e", js, os.path.join(ROOT, "web", "vendor", "jsqr", "jsqr.js")],
+                       input=json.dumps(rows), capture_output=True, text=True, timeout=60)
+    check("the app's QR reader decodes the computer's QR code", r.stdout.strip() == url, r.stdout[-200:] + r.stderr[-300:])
+else:
+    print("SKIP Node not installed (QR reader check)")
+
 print("== upgrading from Inkcast")
 old = os.path.join(TMP, "legacy")
 os.makedirs(old, mode=0o700)
-from pathlib import Path  # noqa: E402
-
 write_private(Path(old) / "pdf-aaaaaaaaaaaa.pdf", tiny_pdf(1))
 write_private(Path(old) / "img-pg2.jpg", b"\xff\xd8\xff\xd9")
 write_private(Path(old) / "session.json", json.dumps({"id": "d1", "page": 0, "pdf": {"name": "Old.pdf", "rev": "aaaaaaaaaaaa"},

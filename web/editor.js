@@ -283,6 +283,7 @@ export class Editor {
     if (msg.t === 'end') {
       const e = this.idx.get(msg.id);
       if (e && this.surface.active.has(msg.id)) this.surface.commit(e[0]);
+      else if (e && e[1].id === this.pid) this.surface.drawInk(); // started before a refresh
     }
     if ((msg.t === 'remove' || msg.t === 'restore') && here) {
       if (this.selection && msg.t === 'remove') this.selection.ids = this.selection.ids.filter((i) => !msg.ids.includes(i));

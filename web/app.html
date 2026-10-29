@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <!-- For the installed copy on GitHub Pages; the computer also sends a stricter policy header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https:; img-src 'self' blob: data: https:; font-src 'self' data: blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' ws: wss: https:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https:; img-src 'self' blob: data: https:; font-src 'self' data: blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' ws: wss: https:; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -23,16 +23,30 @@
   <header class="libbar">
     <img src="icon.svg" alt="" class="liblogo">
     <h1>OpenPad</h1>
-    <button id="pcpill" class="pill" title="Computer"><span class="dot"></span><span id="pctext">This iPad only</span></button>
+    <button id="pcpill" class="pill" title="Computer"><span class="dot"></span><span id="pctext">Connect to computer</span></button>
     <div class="spacer"></div>
     <button id="l-import" class="btn">Import PDF</button>
     <button id="l-new" class="btn primary">New notebook</button>
     <button id="l-settings" class="icon" title="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </header>
+  <div id="banner" hidden>
+    <div>
+      <strong>Install the OpenPad app</strong>
+      <span class="muted">It opens from your Home Screen and keeps working when this computer is off. About a minute, once.</span>
+    </div>
+    <a id="bannergo" class="btn primary">Set up</a>
+    <button id="bannerx" class="icon" title="Not now">✕</button>
+  </div>
   <div id="books"></div>
   <div id="empty" hidden>
-    <p>No notebooks yet.</p>
-    <p class="muted">Notebooks have sections, and sections have pages. Import a PDF to write on it.</p>
+    <h2>Welcome to OpenPad</h2>
+    <p class="muted">Notebooks have sections, and sections have pages. Write on lined, grid or blank paper, or on a PDF.</p>
+    <div class="actions">
+      <button class="btn primary" id="e-new">New notebook</button>
+      <button class="btn" id="e-import">Import a PDF</button>
+      <button class="btn" id="e-connect">Connect to your computer</button>
+    </div>
+    <p class="muted small" id="e-hint">Connecting syncs your notebooks to the computer and shows the open notebook there live, for calls and guests.</p>
   </div>
 </section>
 
@@ -49,6 +63,9 @@
     <button data-tool="eraser" title="Eraser (E)"><svg viewBox="0 0 24 24"><path d="M8.5 20H20"/><path d="M4.6 15.4l9.8-9.8a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 19H8z"/><path d="M9.4 10.6l5 5"/></svg></button>
     <button data-tool="lasso" title="Select and move (S)"><svg viewBox="0 0 24 24"><path d="M7 15c-3-1.5-4-3.6-4-5.5C3 6 7 3 12 3s9 3 9 6.5S17 16 12 16c-1.2 0-2.3-.2-3.3-.5" stroke-dasharray="2.5 2.5"/><path d="M7 15c-.8 2-1 4 1 6"/></svg></button>
     <button data-tool="shape" id="shapebtn" title="Shapes (L)"><svg viewBox="0 0 24 24" id="shapeicon"><path d="M4 20L20 4"/></svg></button>
+  </div>
+  <div class="group" id="stylegroup">
+    <button id="stylebtn" title="Color and width" hidden><span class="dot"></span></button>
   </div>
   <div class="group" id="colors"></div>
   <div class="group" id="widths">
@@ -72,6 +89,8 @@
     <button id="menubtn" title="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
   </div>
 </header>
+
+<div id="stylepop" class="pop" hidden></div>
 
 <div id="shapes" class="pop" hidden>
   <button data-shape="line">Line</button>
@@ -147,16 +166,31 @@
 
 <dialog id="pairdlg">
   <form method="dialog" id="pairform">
-    <h2>Pair with your computer</h2>
-    <p class="muted">On the computer, open OpenPad and choose <b>Pair</b>. Enter the address and PIN it shows.
-      Notebooks then sync to the computer whenever both are on the same Wi-Fi.</p>
-    <label class="field"><span>Address</span><input id="pairaddr" placeholder="192.168.1.20:8770" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url"></label>
-    <label class="field"><span>PIN</span><input id="pairpin" placeholder="6 digits" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+    <h2>Connect to your computer</h2>
+    <p class="muted">On the computer, switch OpenPad on and open its QR code (bar icon, or <b>Pair</b> in the OpenPad window). Then scan it here.</p>
+    <div id="scanbox" hidden>
+      <video id="scanvideo" playsinline muted></video>
+      <div class="scanframe"></div>
+    </div>
+    <p id="scanmsg" class="muted small"></p>
+    <div id="certhelp" hidden>
+      <p><b>Couldn't reach the computer.</b> Check that it's on the same Wi-Fi with OpenPad switched on. The first time, this iPad also needs OpenPad's certificate:</p>
+      <ol>
+        <li><a id="certlink" target="_blank" rel="noopener">Open the setup page</a> and download the certificate.</li>
+        <li>Settings › <b>Profile Downloaded</b> › Install.</li>
+        <li>Settings › General › About › <b>Certificate Trust Settings</b> › turn on OpenPad.</li>
+      </ol>
+      <button type="button" class="btn primary" id="retrybtn">Try again</button>
+    </div>
+    <details id="manual">
+      <summary>Enter the address and PIN instead</summary>
+      <label class="field"><span>Address</span><input id="pairaddr" placeholder="192.168.1.20:8770" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url"></label>
+      <label class="field"><span>PIN</span><input id="pairpin" placeholder="6 digits" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+      <button type="button" class="btn primary" id="pairgo">Connect</button>
+    </details>
     <p id="pairerr" class="error" hidden></p>
-    <p class="muted small" id="pairhelp">The installed app talks to the computer over HTTPS, so the iPad needs OpenPad's certificate first. The computer's Pair screen walks you through it (about a minute, once).</p>
     <div class="actions">
-      <button class="btn" value="cancel" formnovalidate>Cancel</button>
-      <button class="btn primary" id="pairgo" value="pair">Pair</button>
+      <button class="btn" value="cancel" formnovalidate>Close</button>
     </div>
   </form>
 </dialog>

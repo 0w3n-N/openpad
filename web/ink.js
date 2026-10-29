@@ -179,6 +179,14 @@ export async function pdfInfo(bytes) {
   return sizes;
 }
 
+const WIDTHS = [800, 1400, 2000, 2600];
+const PIXEL_BUDGET = 40e6; // about 160 MB of canvas memory for PDF pages
+// Safari only frees a canvas's memory once it has no size.
+const free = (c) => {
+  c.width = 0;
+  c.height = 0;
+};
+
 // Rendered PDF pages and images for page backgrounds. `source(sha)` returns
 // the file's bytes (ArrayBuffer) or a URL to fetch it from.
 export class Backgrounds {
@@ -188,6 +196,7 @@ export class Backgrounds {
     this.images = new Map(); // sha -> {bmp, waiters}
     this.renders = new Map(); // `${sha}/${n}/${px}` -> {canvas, waiters}
     this.order = [];
+    this.pixels = 0; // in rendered canvases: iPad Safari crashes a tab past ~384 MB
   }
   async #bytes(sha) {
     const src = await this.source(sha);
@@ -232,30 +241,53 @@ export class Backgrounds {
     }
     if (!bg.pdf) return null;
     // Render at a few fixed widths so zooming doesn't re-render constantly.
-    const want = [800, 1400, 2200, 3200].find((w) => w >= px) || 3200;
+    const want = WIDTHS.find((w) => w >= px) || WIDTHS[WIDTHS.length - 1];
     const key = `${bg.pdf}/${bg.n}/${want}`;
     let e = this.renders.get(key);
-    if (!e) {
+    if (e) {
+      this.order.splice(this.order.indexOf(key), 1);
+      this.order.push(key); // most recently used last
+    } else {
       e = { canvas: null, waiters: [] };
       this.renders.set(key, e);
       this.order.push(key);
-      while (this.order.length > 14) this.renders.delete(this.order.shift());
       this.#render(bg.pdf, bg.n, want)
         .then((c) => {
+          if (this.renders.get(key) !== e) return free(c); // evicted meanwhile
           e.canvas = c;
+          this.pixels += c.width * c.height;
+          this.#evict(key);
           e.waiters.splice(0).forEach((f) => f());
         })
-        .catch(() => this.renders.delete(key));
+        .catch(() => {
+          this.renders.delete(key);
+          this.order.splice(this.order.indexOf(key), 1);
+        });
     }
     if (!e.canvas) {
       if (onready) e.waiters.push(onready);
       // Meanwhile, any rendered size of the same page will do.
-      for (const w of [3200, 2200, 1400, 800]) {
+      for (const w of [...WIDTHS].reverse()) {
         const other = this.renders.get(`${bg.pdf}/${bg.n}/${w}`);
         if (other?.canvas) return other.canvas;
       }
     }
     return e.canvas;
+  }
+  // Drop the least recently used renders over the budget (never `keep`).
+  #evict(keep) {
+    for (let i = 0; this.pixels > PIXEL_BUDGET && i < this.order.length; ) {
+      const key = this.order[i];
+      const e = this.renders.get(key);
+      if (key === keep || !e?.canvas) {
+        i++;
+        continue;
+      }
+      this.pixels -= e.canvas.width * e.canvas.height;
+      free(e.canvas);
+      this.renders.delete(key);
+      this.order.splice(i, 1);
+    }
   }
   async #render(sha, n, width) {
     const doc = await this.#doc(sha);
@@ -275,7 +307,7 @@ export class Backgrounds {
   async load(page, px) {
     for (let i = 0; i < 400; i++) {
       const d = this.get(page, px);
-      if (d && (!page.bg?.pdf || d.width >= Math.min(px, 3200) * 0.99 || i > 300)) return d;
+      if (d && (!page.bg?.pdf || d.width >= Math.min(px, WIDTHS[WIDTHS.length - 1]) * 0.99 || i > 300)) return d;
       await new Promise((r) => setTimeout(r, 25));
     }
     return this.get(page, px);
@@ -412,7 +444,7 @@ export class Surface {
     ctx.shadowColor = 'transparent';
     drawPaper(ctx, page, k);
     const img = this.backgrounds?.get(page, page.w * k * this.dpr, () => this.page === page && this.drawBg());
-    if (img) {
+    if (img?.width) {
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, page.w * k, page.h * k);
     }
@@ -539,7 +571,9 @@ async function jpegOf(drawable, maxW = 2000) {
   ctx.fillRect(0, 0, c.width, c.height);
   ctx.drawImage(drawable, 0, 0, c.width, c.height);
   const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.86));
-  return { bytes: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height };
+  const out = { bytes: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height };
+  free(c);
+  return out;
 }
 
 // Build a PDF of `pages`. Ink and paper are vectors; PDF and window
@@ -587,8 +621,11 @@ export async function buildPDF(pages, { backgrounds, outline = [], title = 'Open
     if (page.bg) {
       let d = null;
       if (page.bg.live) d = liveFrame;
-      else if (backgrounds) d = await backgrounds.load(page, 1700);
-      if (d) image = { id: alloc(), ...(await jpegOf(d)) };
+      else if (backgrounds) {
+        d = await backgrounds.load(page, 1700);
+        if (d && !d.width) d = await backgrounds.load(page, 1700); // freed meanwhile to save memory
+      }
+      if (d?.width) image = { id: alloc(), ...(await jpegOf(d)) };
     }
     const content = [
       `q ${f2(k)} 0 0 ${f2(-k)} 0 ${f2(H)} cm`,
@@ -643,7 +680,7 @@ export async function savePDF(blob, filename) {
     }
   }
   const file = new File([blob], filename, { type: 'application/pdf' });
-  const touch = matchMedia('(pointer: coarse)').matches;
+  const touch = navigator.maxTouchPoints > 1;
   if (touch && navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ files: [file] });

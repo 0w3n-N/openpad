@@ -9,19 +9,33 @@ import { assets, digest, merge, mergeInto, normalize, order, sha256Hex } from '.
 import * as store from './store.js';
 import { Backgrounds, buildPDF } from './ink.js';
 
+export const PROTOCOL = 5; // must match openpad/server.py
+
+export class ConnectError extends Error {
+  constructor(message, setupURL = null) {
+    super(message);
+    this.setupURL = setupURL;
+  }
+}
+
 export class Link {
-  constructor({ base, key, name = '' }) {
+  constructor({ base, key, name = '', alts = [] }) {
     this.base = base.replace(/\/$/, '');
     this.key = key;
     this.name = name;
+    this.alts = alts.filter((a) => a !== this.base);
+  }
+
+  save() {
+    return store.kvSet('pc', { base: this.base, key: this.key, name: this.name, alts: this.alts });
   }
 
   static async fromPage() {
-    // Opened from the computer's pairing link: same origin, key in the URL.
+    // Opened from the computer's QR code in Safari: same origin, key in the URL.
     const k = new URLSearchParams(location.search).get('k');
     if (k && location.protocol === 'http:') {
       const link = new Link({ base: location.origin, key: k });
-      await store.kvSet('pc', { base: link.base, key: k, name: '' });
+      await link.save();
       return link;
     }
     const saved = await store.kvGet('pc');
@@ -33,42 +47,89 @@ export class Link {
     return null;
   }
 
+  // The computer's QR code: http://<address>:<port>/app?k=<key> (or /?k= from
+  // older versions). Returns {host, key} or null.
+  static parseCode(text) {
+    try {
+      const u = new URL(text.trim());
+      const k = u.searchParams.get('k');
+      if (u.protocol !== 'http:' || !/^\/(app)?$/.test(u.pathname) || !/^[A-Za-z0-9_-]{22,64}$/.test(k || '')) return null;
+      return { host: u.host, key: k };
+    } catch {
+      return null;
+    }
+  }
+
+  // Pair with the key from a scanned code (or a PIN, see pair()). The installed
+  // app reaches the computer over HTTPS, which needs OpenPad's certificate.
+  static async connect(host, key) {
+    const scheme = location.protocol === 'https:' ? 'https' : 'http';
+    const base = `${scheme}://${host}`;
+    let info;
+    try {
+      const r = await fetch(`${base}/api/pairing`, { headers: { 'X-OpenPad-Key': key }, cache: 'no-store' });
+      if (r.status === 403) throw new ConnectError('That code is out of date. Show the QR code on the computer again and rescan.');
+      if (!r.ok) throw new ConnectError(`The computer answered with an error (${r.status}).`);
+      info = await r.json();
+    } catch (e) {
+      if (e instanceof ConnectError) throw e;
+      throw new ConnectError(
+        `Couldn't reach ${host}.`,
+        scheme === 'https' ? `http://${host}/setup?k=${encodeURIComponent(key)}` : null,
+      );
+    }
+    // Other addresses for the same computer (e.g. omarchy.local), tried if
+    // its IP address changes later.
+    const alts = (info.addresses || []).map((a) => `${scheme}://${a}`);
+    const link = new Link({ base, key, name: info.name || '', alts });
+    await link.save();
+    return link;
+  }
+
   // Trade the 6-digit PIN shown on the computer for the key.
   static async pair(address, pin) {
     const host = address.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     const withPort = /:\d+$/.test(host) ? host : `${host}:8770`;
     const scheme = location.protocol === 'https:' ? 'https' : 'http';
-    const base = `${scheme}://${withPort}`;
     let r;
     try {
-      r = await fetch(`${base}/api/pair`, {
+      r = await fetch(`${scheme}://${withPort}/api/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: pin.trim() }),
       });
     } catch {
-      throw new Error(scheme === 'https'
-        ? `Couldn't reach ${withPort}. Check the address, that both devices are on the same Wi-Fi, and that this iPad trusts the OpenPad certificate (see Set up on the computer's Pair screen).`
-        : `Couldn't reach ${withPort}.`);
+      throw new ConnectError(`Couldn't reach ${withPort}.`, scheme === 'https' ? `http://${withPort}/setup` : null);
     }
-    if (!r.ok) throw new Error(r.status === 403 ? 'Wrong or expired PIN. Check the PIN on the computer and try again.' : `Pairing failed (${r.status})`);
-    const { k, name } = await r.json();
-    const link = new Link({ base, key: k, name });
-    await store.kvSet('pc', { base, key: k, name });
-    return link;
+    if (!r.ok) throw new ConnectError(r.status === 403 ? 'Wrong or expired PIN. Check the PIN on the computer and try again.' : `Pairing failed (${r.status})`);
+    const { k } = await r.json();
+    return Link.connect(withPort, k);
   }
 
   url(path) {
     return `${this.base}${path}`;
   }
 
+  async #fetch(path, opts) {
+    try {
+      return await fetch(this.url(path), opts);
+    } catch (e) {
+      // Unreachable: the computer may have a new IP address. Try the others.
+      for (const alt of this.alts) {
+        try {
+          const r = await fetch(alt + path, opts);
+          this.alts = [this.base, ...this.alts.filter((a) => a !== alt)];
+          this.base = alt;
+          this.save();
+          return r;
+        } catch {}
+      }
+      throw e;
+    }
+  }
+
   async api(path, { method = 'GET', body, headers = {}, json = true } = {}) {
-    const r = await fetch(this.url(path), {
-      method,
-      body,
-      headers: { 'X-OpenPad-Key': this.key, ...headers },
-      cache: 'no-store',
-    });
+    const r = await this.#fetch(path, { method, body, headers: { 'X-OpenPad-Key': this.key, ...headers }, cache: 'no-store' });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       const e = new Error(j.error || `${method} ${path} failed (${r.status})`);
@@ -82,8 +143,12 @@ export class Link {
     return this.url(`/api/asset/${sha}?k=${encodeURIComponent(this.key)}`);
   }
 
+  setupURL() {
+    return `${this.base.replace(/^https:/, 'http:')}/setup?k=${encodeURIComponent(this.key)}`;
+  }
+
   wsURL(role) {
-    return `${this.base.replace(/^http/, 'ws')}/ws?role=${role}&k=${encodeURIComponent(this.key)}`;
+    return `${this.base.replace(/^http/, 'ws')}/ws?role=${role}&v=${PROTOCOL}&k=${encodeURIComponent(this.key)}`;
   }
 }
 
@@ -92,6 +157,7 @@ export class Link {
 // Reconnecting socket. Owner apps drop edits made while offline (they're
 // saved locally and sync later); guests queue them and send after reconnecting.
 export function socket(url, handlers, { queueOffline = false } = {}) {
+  const target = typeof url === 'function' ? url : () => url;
   let ws = null;
   let queue = [];
   let retry = 250;
@@ -116,7 +182,7 @@ export function socket(url, handlers, { queueOffline = false } = {}) {
   };
   function open() {
     if (closed) return;
-    ws = new WebSocket(url);
+    ws = new WebSocket(target());
     ws.binaryType = 'blob';
     ws.onopen = () => {
       retry = 250;
@@ -138,7 +204,7 @@ export function socket(url, handlers, { queueOffline = false } = {}) {
       handlers.status?.(false);
       if (closed) return;
       setTimeout(open, retry);
-      retry = Math.min(retry * 2, 5000);
+      retry = Math.min(retry * 2, 8000);
     };
   }
   open();
