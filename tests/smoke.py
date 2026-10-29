@@ -19,16 +19,17 @@ import urllib.request
 
 sys.dont_write_bytecode = True
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TMP = tempfile.mkdtemp(prefix="inkcast-smoke-")
+TMP = tempfile.mkdtemp(prefix="openpad-smoke-")
 os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "data")
 os.environ["XDG_STATE_HOME"] = os.path.join(TMP, "state")
 os.environ["LOCALAPPDATA"] = os.path.join(TMP, "local")  # Windows data folder
 os.environ.pop("XDG_RUNTIME_DIR", None)
+os.environ["OPENPAD_NOTES"] = os.path.join(TMP, "notes")
 sys.path.insert(0, ROOT)
 
-import inkcast.cli as cli  # noqa: E402
-from inkcast import qr  # noqa: E402
-from inkcast.server import data_dir  # noqa: E402
+import openpad.cli as cli  # noqa: E402
+from openpad import qr  # noqa: E402
+from openpad.server import data_dir  # noqa: E402
 
 results = []
 
@@ -47,7 +48,7 @@ def free_port():
 
 
 PORT = free_port()
-INKCAST = [sys.executable, "-B", os.path.join(ROOT, "bin", "inkcast")]
+OPENPAD = [sys.executable, "-B", os.path.join(ROOT, "bin", "openpad")]
 
 
 HOST = []  # set below if this machine has no LAN address (some CI VMs)
@@ -55,7 +56,7 @@ HOST = []  # set below if this machine has no LAN address (some CI VMs)
 
 def run(*args, port=True):
     extra = ["--port", str(PORT)] + HOST if port else []
-    return subprocess.run(INKCAST + list(args) + extra, capture_output=True, text=True, encoding="utf-8",
+    return subprocess.run(OPENPAD + list(args) + extra, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=90, env=os.environ)
 
 
@@ -76,7 +77,7 @@ if not doc.get("lan"):
 
 # the CLI starts the background server (detached process, per-OS flags)
 r = run("start")
-check("inkcast start", r.returncode == 0, r.stderr[-500:])
+check("openpad start", r.returncode == 0, r.stderr[-500:])
 if r.returncode != 0:
     log = cli.log_dir() / "server.log"
     print("server.log:\n" + (log.read_text(errors="replace")[-3000:] if log.exists() else "(missing)"))
@@ -85,15 +86,15 @@ key = (data_dir() / "token").read_text().strip()
 check("key file exists", len(key) >= 22)
 
 r = run("status", "--json")
-check("inkcast status", r.returncode == 0 and json.loads(r.stdout).get("running") is True, r.stdout + r.stderr)
+check("openpad status", r.returncode == 0 and json.loads(r.stdout).get("running") is True, r.stdout + r.stderr)
 
 r = run("url")
-check("inkcast url prints the link and a QR code", r.returncode == 0 and "/?k=" in r.stdout and "▀" in r.stdout,
+check("openpad url prints the link and a QR code", r.returncode == 0 and "/?k=" in r.stdout and "▀" in r.stdout,
       r.stdout[-300:] + r.stderr[-300:])
 
 # HTTP + WebSocket like the iPad
 with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/?k={key}", timeout=5) as resp:
-    check("pad page served", resp.status == 200 and b"pad.js" in resp.read())
+    check("notes app served", resp.status == 200 and b"app.js" in resp.read())
 with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/qr.svg?k={key}", timeout=5) as resp:
     check("QR image served", resp.read().startswith(b"<svg"))
 
@@ -113,7 +114,7 @@ data = b""
 while len(data) < n:
     data += s.recv(n - len(data))
 state = json.loads(data)
-check("document state received", state.get("t") == "state" and state["doc"]["pages"], state.get("t"))
+check("live notebook received", state.get("t") == "state" and state["nb"]["pages"], state.get("t"))
 check("capture mode reported", state.get("capture") in ("native", "browser"), state.get("capture"))
 s.close()
 
@@ -126,7 +127,7 @@ launcher = urllib.request.url2pathname(urllib.parse.urlparse(opened[0]).path) if
 check("launcher page is on disk until it's used", launcher and os.path.isfile(launcher), launcher)
 
 r = run("stop")
-check("inkcast stop", r.returncode == 0 and cli.probe(PORT) is None, r.stdout + r.stderr)
+check("openpad stop", r.returncode == 0 and cli.probe(PORT) is None, r.stdout + r.stderr)
 
 # the Windows scripts at least parse
 if os.name == "nt":
@@ -136,8 +137,8 @@ if os.name == "nt":
               f"'{path}', [ref]$null, [ref]$errs); if ($errs) {{ $errs | Out-String; exit 1 }}")
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
         check(f"{script} parses in Windows PowerShell", r.returncode == 0, r.stdout + r.stderr)
-    r = subprocess.run([os.path.join(ROOT, "bin", "inkcast.cmd"), "--version"], capture_output=True, text=True)
-    check("bin\\inkcast.cmd runs", r.returncode == 0 and "inkcast" in r.stdout, r.stdout + r.stderr)
+    r = subprocess.run([os.path.join(ROOT, "bin", "openpad.cmd"), "--version"], capture_output=True, text=True)
+    check("bin\\openpad.cmd runs", r.returncode == 0 and "openpad" in r.stdout, r.stdout + r.stderr)
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

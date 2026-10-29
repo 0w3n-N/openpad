@@ -6,22 +6,22 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Inkcast bar widget: an icon that shows whether the whiteboard is live, and a
+// OpenPad bar widget: an icon that shows whether the whiteboard is live, and a
 // popup to start it, pair an iPad by QR code, open the share window, and
 // toggle AirPlay mirroring.
 //
-// All work happens in the bundled `bin/inkcast` CLI, run with argument
+// All work happens in the bundled `bin/openpad` CLI, run with argument
 // arrays (never through a shell). The widget only reads two small status
-// files the CLI writes to $XDG_RUNTIME_DIR/inkcast/.
+// files the CLI writes to $XDG_RUNTIME_DIR/openpad/.
 Panel {
   id: root
-  moduleName: "io.github.0w3n-n.inkcast"
-  ipcTarget: "io.github.0w3n-n.inkcast"
+  moduleName: "io.github.0w3n-n.openpad"
+  ipcTarget: "io.github.0w3n-n.openpad"
   manageIpc: false
 
   readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")).replace(/\/$/, "")
-  readonly property string cli: pluginDir + "/bin/inkcast"
-  readonly property string runDir: Quickshell.env("XDG_RUNTIME_DIR") + "/inkcast"
+  readonly property string cli: pluginDir + "/bin/openpad"
+  readonly property string runDir: Quickshell.env("XDG_RUNTIME_DIR") + "/openpad"
 
   readonly property int port: Model.toInt(setting("port", 8770), 1024, 65535, 8770)
   readonly property string airplayName: Model.airplayName(setting("airplayName", "Omarchy"))
@@ -48,7 +48,7 @@ Panel {
   readonly property color barIconColor: live ? Color.accent : (st.running ? barForeground : Qt.darker(barForeground, 1.55))
 
   // Rows the keyboard cursor walks, top to bottom.
-  readonly property var rows: st.running ? ["open", "annotate", "mirror", "setup"] : ["start", "annotate", "mirror", "setup"]
+  readonly property var rows: st.running ? ["open", "invite", "annotate", "mirror", "setup"] : ["start", "invite", "annotate", "mirror", "setup"]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -77,6 +77,11 @@ Panel {
 
   function openWindow() {
     runCli("open")
+  }
+
+  function invite() {
+    runCli("invite")
+    root.close()
   }
 
   function toggleMirror() {
@@ -111,6 +116,7 @@ Panel {
   function activate(name) {
     if (name === "start") toggleServer()
     else if (name === "open") openWindow()
+    else if (name === "invite") invite()
     else if (name === "annotate") toggleAnnotate()
     else if (name === "mirror") toggleMirror()
     else if (name === "setup") runSetup()
@@ -176,7 +182,7 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         var msg = Model.singleLine(String(actionErr.text || "").trim().split("\n").pop(), 200)
-        root.errorText = msg || "Inkcast could not " + root.pendingAction + " the whiteboard"
+        root.errorText = msg || "OpenPad could not " + root.pendingAction + " the whiteboard"
       }
       root.pendingAction = ""
       root.refresh()
@@ -217,6 +223,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function board(): void { root.openWindow() }
+    function invite(): void { root.invite() }
     function start(): void { if (!root.st.running) root.toggleServer() }
     function stop(): void { if (root.st.running) root.toggleServer() }
     function mirror(): void { root.toggleMirror() }
@@ -230,11 +237,11 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: "Inkcast · " + Model.statusLine(root.st, root.mirroring)
+    tooltipText: "OpenPad · " + Model.statusLine(root.st, root.mirroring)
       + (root.st.running ? "\nRight-click: open the share window" : "\nRight-click: start and open the share window")
     iconComponent: Component {
       Item {
-        InkcastIcon {
+        OpenPadIcon {
           anchors.centerIn: parent
           iconSize: Style.bar.iconCanvas
           color: root.barIconColor
@@ -283,7 +290,7 @@ Panel {
         PanelHero {
           id: hero
           width: parent.width
-          title: "Inkcast"
+          title: "OpenPad"
           meta: root.pendingAction === "start" ? "Starting…"
             : root.pendingAction === "stop" ? "Stopping…"
             : root.st.live === "live" ? "Window live"
@@ -291,7 +298,7 @@ Panel {
           foreground: root.foreground
           fontFamily: root.fontFamily
           iconComponent: Component {
-            InkcastIcon {
+            OpenPadIcon {
               iconSize: Style.font.display
               color: root.live ? Color.accent : root.foreground
             }
@@ -306,7 +313,7 @@ Panel {
 
               PanelToolTip {
                 visible: serverSwitch.containsMouse
-                text: root.st.running ? "Stop the whiteboard" : "Start the whiteboard"
+                text: root.st.running ? "Stop OpenPad" : "Start OpenPad"
                 fontFamily: hero.fontFamily
               }
             }
@@ -404,11 +411,20 @@ Panel {
         ActionRow {
           name: root.st.running ? "open" : "start"
           glyph: "󰍹"
-          title: root.st.running ? "Open the share window" : "Start the whiteboard"
+          title: root.st.running ? "Open the share window" : "Start OpenPad"
           subtitle: root.st.running
             ? "A clean window to share in Zoom, Teams or Meet"
             : "Then scan the QR code with your iPad"
           onActivated: root.st.running ? root.openWindow() : root.toggleServer()
+        }
+
+        ActionRow {
+          name: "invite"
+          glyph: "󰐲"
+          title: root.st.guests > 0 ? "Invite people  ·  " + root.st.guests + " joined" : "Invite people"
+          subtitle: root.st.internet ? "Internet link is on. Open to turn it off"
+            : "A link to watch and write along live, and save PDFs"
+          onActivated: root.invite()
         }
 
         ActionRow {

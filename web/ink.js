@@ -1,143 +1,41 @@
-// Shared rendering, networking and export for the pad and the viewer.
+// Drawing, page backgrounds (PDFs via pdf.js) and PDF export, shared by the
+// notes app, the share window and guest pages.
 
 export const COLORS = ['#111111', '#1f5fd6', '#d62f2f', '#1d9a4b', '#e07b00', '#7b3fd1', '#ffffff'];
 
-// ---------------------------------------------------------------- auth & theme
+// ---------------------------------------------------------------- pressure
 
-// The key comes from the pairing link (?k=, the iPad) or from a one-time
-// launch code (#c=, the desktop viewer) that is swapped for the key and then
-// removed from the address bar. The viewer keeps it in sessionStorage so a
-// reload still works; nothing is stored in cookies.
-export async function getKey() {
-  const params = new URLSearchParams(location.search);
-  const code = new URLSearchParams(location.hash.slice(1)).get('c');
-  if (code) {
-    try {
-      const r = await fetch('/api/redeem', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ c: code }),
-      });
-      if (r.ok) {
-        const { k } = await r.json();
-        try {
-          sessionStorage.setItem('inkcast.k', k);
-        } catch {}
-        history.replaceState(null, '', location.pathname);
-        return k;
-      }
-    } catch {}
-    history.replaceState(null, '', location.pathname);
-  }
-  const k = params.get('k');
-  if (k) return k;
-  try {
-    return sessionStorage.getItem('inkcast.k') || '';
-  } catch {
-    return '';
-  }
+// Width multiplier from the stored pressure value. Points are stored already
+// shaped by the writer's sensitivity setting (see shapePressure), so every
+// screen draws the same widths.
+export const pressureWidth = (base, p) => base * (0.35 + 1.15 * Math.min(1, Math.max(0, p ?? 0.5)));
+const NEUTRAL = 0.65 / 1.15; // stored value that gives exactly the base width
+
+// Raw Pencil pressure -> stored value. sensitivity 0 = constant width,
+// 1 = the full range. Values are smoothed along the stroke so small wobbles
+// in pressure don't make the line lumpy.
+export function shapePressure(raw, sensitivity, prev) {
+  const p = NEUTRAL + (Math.min(1, Math.max(0, raw)) - NEUTRAL) * sensitivity;
+  return prev == null ? p : prev + (p - prev) * 0.35;
 }
-
-export async function keyWorks(key) {
-  if (!key) return false;
-  try {
-    return (await fetch(`/api/info?k=${encodeURIComponent(key)}`)).ok;
-  } catch {
-    return true; // server unreachable: let the reconnect loop handle it
-  }
-}
-
-export function showLocked(message) {
-  const el = document.createElement('div');
-  el.id = 'locked';
-  const card = document.createElement('div');
-  card.className = 'card';
-  const h = document.createElement('h1');
-  h.textContent = 'Inkcast';
-  const p = document.createElement('p');
-  p.textContent = message;
-  card.append(h, p);
-  el.append(card);
-  document.body.append(el);
-}
-
-// Live-updating link to the Omarchy theme stylesheet.
-export function useTheme(key) {
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  document.head.append(link);
-  const set = (v) => (link.href = `/theme.css?k=${encodeURIComponent(key)}&v=${encodeURIComponent(v || '')}`);
-  set(Date.now());
-  return set;
-}
-
-// What to tell the user about desktop annotation (the "live" message).
-export function liveNotice(msg) {
-  if (msg.state === 'picking') return 'Choose the window in the picker on your computer…';
-  if (msg.state === 'live') return 'The window is live. Draw on it.';
-  if (msg.state === 'error') return msg.error || 'Window capture failed';
-  if (msg.reason === 'cancelled') return 'Window sharing cancelled';
-  if (msg.reason === 'closed') return 'The window closed. Its last frame stays on the page.';
-  if (msg.reason === 'stopped') return 'Stopped. The last frame stays on the page.';
-  if (msg.reason === 'error') return msg.error || 'Window capture stopped';
-  return '';
-}
-
-// ---------------------------------------------------------------- connection
-
-export function connect(role, handlers, k) {
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=${role}&k=${encodeURIComponent(k)}`;
-  let ws = null;
-  let queue = [];
-  let retry = 250;
-  const api = {
-    connected: false,
-    key: k,
-    send(msg) {
-      const s = JSON.stringify(msg);
-      if (ws && ws.readyState === 1) ws.send(s);
-      else if (msg.t !== 'cursor') queue.push(s);
-    },
-    sendBinary(data) {
-      if (ws && ws.readyState === 1) ws.send(data);
-    },
-    bufferedAmount() {
-      return ws ? ws.bufferedAmount : 0;
-    },
-  };
-  function open() {
-    ws = new WebSocket(url);
-    ws.binaryType = 'blob';
-    ws.onopen = () => {
-      retry = 250;
-      api.connected = true;
-      handlers.status?.(true);
-    };
-    ws.onmessage = (e) => {
-      if (typeof e.data !== 'string') return handlers.frame?.(e.data); // live window frame (JPEG)
-      const msg = JSON.parse(e.data);
-      handlers.message(msg);
-      // Flush only after the fresh state arrived, so queued ops apply on top of it.
-      if (msg.t === 'state' && queue.length) {
-        for (const s of queue) ws.send(s);
-        queue = [];
-      }
-    };
-    ws.onclose = () => {
-      api.connected = false;
-      handlers.status?.(false);
-      setTimeout(open, retry);
-      retry = Math.min(retry * 2, 4000);
-    };
-  }
-  open();
-  return api;
-}
+export { NEUTRAL as NEUTRAL_PRESSURE };
 
 // ---------------------------------------------------------------- strokes
 
-// Width multiplier from pen pressure. Mouse/finger report 0.5.
-const pressureWidth = (base, p) => base * (0.35 + 1.15 * Math.min(1, Math.max(0, p ?? 0.5)));
+// Quadratic segments through midpoints, one per point so width follows pressure.
+function segments(p) {
+  const out = [];
+  let x0 = p[0][0], y0 = p[0][1];
+  for (let i = 1; i < p.length; i++) {
+    const last = i === p.length - 1;
+    const x1 = last ? p[i][0] : (p[i][0] + p[i + 1][0]) / 2;
+    const y1 = last ? p[i][1] : (p[i][1] + p[i + 1][1]) / 2;
+    out.push({ x0, y0, cx: p[i][0], cy: p[i][1], x1, y1, line: last, pr: p[i][2] });
+    x0 = x1;
+    y0 = y1;
+  }
+  return out;
+}
 
 export function drawStroke(ctx, s, k) {
   const p = s.pts;
@@ -153,12 +51,11 @@ export function drawStroke(ctx, s, k) {
     ctx.lineWidth = s.width * k;
     ctx.beginPath();
     ctx.moveTo(p[0][0] * k, p[0][1] * k);
-    for (let i = 1; i < p.length - 1; i++) {
-      const mx = (p[i][0] + p[i + 1][0]) / 2, my = (p[i][1] + p[i + 1][1]) / 2;
-      ctx.quadraticCurveTo(p[i][0] * k, p[i][1] * k, mx * k, my * k);
+    for (const g of segments(p)) {
+      if (g.line) ctx.lineTo(g.x1 * k, g.y1 * k);
+      else ctx.quadraticCurveTo(g.cx * k, g.cy * k, g.x1 * k, g.y1 * k);
     }
-    const l = p[p.length - 1];
-    ctx.lineTo(l[0] * k, l[1] * k);
+    if (p.length === 1) ctx.lineTo(p[0][0] * k + 0.01, p[0][1] * k);
     ctx.stroke();
     ctx.restore();
     return;
@@ -169,21 +66,13 @@ export function drawStroke(ctx, s, k) {
     ctx.fill();
     return;
   }
-  // Quadratic curves through segment midpoints, one segment at a time so the
-  // width can follow pressure.
-  let x0 = p[0][0], y0 = p[0][1];
-  for (let i = 1; i < p.length; i++) {
-    const last = i === p.length - 1;
-    const x1 = last ? p[i][0] : (p[i][0] + p[i + 1][0]) / 2;
-    const y1 = last ? p[i][1] : (p[i][1] + p[i + 1][1]) / 2;
-    ctx.lineWidth = pressureWidth(s.width, p[i][2]) * k;
+  for (const g of segments(p)) {
+    ctx.lineWidth = pressureWidth(s.width, g.pr) * k;
     ctx.beginPath();
-    ctx.moveTo(x0 * k, y0 * k);
-    if (last) ctx.lineTo(x1 * k, y1 * k);
-    else ctx.quadraticCurveTo(p[i][0] * k, p[i][1] * k, x1 * k, y1 * k);
+    ctx.moveTo(g.x0 * k, g.y0 * k);
+    if (g.line) ctx.lineTo(g.x1 * k, g.y1 * k);
+    else ctx.quadraticCurveTo(g.cx * k, g.cy * k, g.x1 * k, g.y1 * k);
     ctx.stroke();
-    x0 = x1;
-    y0 = y1;
   }
 }
 
@@ -207,68 +96,190 @@ export function strokeHit(s, x, y, r) {
   return false;
 }
 
+export function strokeBounds(s) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of s.pts) {
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+  }
+  const m = s.width;
+  return [x0 - m, y0 - m, x1 + m, y1 + m];
+}
+
 // ---------------------------------------------------------------- paper
+
+// Paper lines as [x0, y0, x1, y1, color, width] in page units, shared by the
+// screen and PDF export.
+export function paperLines(page) {
+  const kind = page.paper || 'blank';
+  const out = [];
+  if (kind === 'blank' || page.bg || kind === 'dots') return out;
+  const { w, h } = page;
+  if (kind === 'lines') {
+    for (let y = 64; y < h - 8; y += 32) out.push([0, y, w, y, '#c8d6ea', 1]);
+    out.push([80, 0, 80, h, '#f0b4b4', 1]);
+  } else if (kind === 'grid') {
+    for (let y = 32; y < h; y += 32) out.push([0, y, w, y, '#dbe2ec', 1]);
+    for (let x = 32; x < w; x += 32) out.push([x, 0, x, h, '#dbe2ec', 1]);
+  } else if (kind === 'eng') {
+    // Engineering paper: fine 10-unit grid with a darker line every 5 cells.
+    for (let y = 10, i = 1; y < h; y += 10, i++) out.push([0, y, w, y, i % 5 ? '#e3eaf2' : '#b7c7da', i % 5 ? 0.6 : 1]);
+    for (let x = 10, i = 1; x < w; x += 10, i++) out.push([x, 0, x, h, i % 5 ? '#e3eaf2' : '#b7c7da', i % 5 ? 0.6 : 1]);
+  }
+  return out;
+}
 
 export function drawPaper(ctx, page, k) {
   const w = page.w * k, h = page.h * k;
   ctx.fillStyle = page.bg?.live ? '#000000' : '#ffffff';
   ctx.fillRect(0, 0, w, h);
-  const kind = page.paper || 'blank';
-  if (kind === 'blank' || page.bg) return;
-  const step = 32 * k;
-  ctx.save();
-  if (kind === 'dots') {
+  if (page.bg) return;
+  if (page.paper === 'dots') {
     ctx.fillStyle = '#b9c0cc';
     const r = Math.max(1, 1.6 * k);
-    for (let y = step; y < h; y += step)
-      for (let x = step; x < w; x += step) {
+    for (let y = 32; y < page.h; y += 32)
+      for (let x = 32; x < page.w; x += 32) {
         ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.arc(x * k, y * k, r, 0, Math.PI * 2);
         ctx.fill();
       }
-  } else {
-    ctx.strokeStyle = kind === 'grid' ? '#dbe2ec' : '#c8d6ea';
-    ctx.lineWidth = Math.max(1, k);
+    return;
+  }
+  for (const [x0, y0, x1, y1, color, lw] of paperLines(page)) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(0.6, lw * k);
     ctx.beginPath();
-    for (let y = (kind === 'lines' ? 2 : 1) * step; y < h; y += step) {
-      ctx.moveTo(0, Math.round(y) + 0.5);
-      ctx.lineTo(w, Math.round(y) + 0.5);
-    }
-    if (kind === 'grid')
-      for (let x = step; x < w; x += step) {
-        ctx.moveTo(Math.round(x) + 0.5, 0);
-        ctx.lineTo(Math.round(x) + 0.5, h);
-      }
+    const vx = x0 === x1, px = (v) => Math.round(v * k) + 0.5;
+    ctx.moveTo(vx ? px(x0) : x0 * k, vx ? y0 * k : px(y0));
+    ctx.lineTo(vx ? px(x1) : x1 * k, vx ? y1 * k : px(y1));
     ctx.stroke();
   }
-  ctx.restore();
 }
 
-// ---------------------------------------------------------------- background images
+// ---------------------------------------------------------------- backgrounds
 
-const imgCache = new Map();
-export function pageImageURL(page, key) {
-  const q = key ? `?k=${encodeURIComponent(key)}` : '';
-  if (page.bg?.pdf) return `/api/pdf/${page.bg.pdf}/${page.bg.n}.png${q}`;
-  if (page.bg?.img) return `/api/img/${page.bg.img}.jpg${q}`;
-  return null; // blank paper, or a live window (drawn from the video layer)
+let pdfjsReady = null;
+function pdfjs() {
+  pdfjsReady ??= import(new URL('./vendor/pdfjs/pdf.min.mjs', import.meta.url).href).then((lib) => {
+    lib.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
+    return lib;
+  });
+  return pdfjsReady;
 }
-export function loadImage(url, onload) {
-  if (!url) return null;
-  let e = imgCache.get(url);
-  if (!e) {
-    const img = new Image();
-    e = { img, ready: false, waiters: [] };
-    img.onload = () => {
-      e.ready = true;
-      e.waiters.splice(0).forEach((f) => f());
-    };
-    img.src = url;
-    imgCache.set(url, e);
+
+// Page count and page sizes (points, rotation applied) of a PDF.
+export async function pdfInfo(bytes) {
+  const lib = await pdfjs();
+  const doc = await lib.getDocument({ data: bytes.slice(0), isEvalSupported: false, disableFontFace: false }).promise;
+  const sizes = [];
+  for (let i = 1; i <= Math.min(doc.numPages, 2000); i++) {
+    const vp = (await doc.getPage(i)).getViewport({ scale: 1 });
+    sizes.push([Math.round(vp.width * 100) / 100, Math.round(vp.height * 100) / 100]);
   }
-  if (e.ready) return e.img;
-  if (onload) e.waiters.push(onload);
-  return null;
+  doc.destroy();
+  return sizes;
+}
+
+// Rendered PDF pages and images for page backgrounds. `source(sha)` returns
+// the file's bytes (ArrayBuffer) or a URL to fetch it from.
+export class Backgrounds {
+  constructor(source) {
+    this.source = source;
+    this.docs = new Map(); // sha -> Promise<PDFDocumentProxy>
+    this.images = new Map(); // sha -> {bmp, waiters}
+    this.renders = new Map(); // `${sha}/${n}/${px}` -> {canvas, waiters}
+    this.order = [];
+  }
+  async #bytes(sha) {
+    const src = await this.source(sha);
+    if (typeof src === 'string') {
+      const r = await fetch(src);
+      if (!r.ok) throw new Error(`could not load ${sha.slice(0, 8)} (${r.status})`);
+      return new Uint8Array(await r.arrayBuffer());
+    }
+    return new Uint8Array(src);
+  }
+  #doc(sha) {
+    if (!this.docs.has(sha)) {
+      const p = (async () => {
+        const lib = await pdfjs();
+        return lib.getDocument({ data: await this.#bytes(sha), isEvalSupported: false }).promise;
+      })();
+      p.catch(() => this.docs.delete(sha));
+      this.docs.set(sha, p);
+    }
+    return this.docs.get(sha);
+  }
+  // The drawable for a page at about `px` pixels wide, or null while it loads
+  // (onready runs when it's there).
+  get(page, px, onready) {
+    const bg = page.bg;
+    if (!bg) return null;
+    if (bg.img) {
+      let e = this.images.get(bg.img);
+      if (!e) {
+        e = { bmp: null, waiters: [] };
+        this.images.set(bg.img, e);
+        this.#bytes(bg.img)
+          .then((b) => createImageBitmap(new Blob([b])))
+          .then((bmp) => {
+            e.bmp = bmp;
+            e.waiters.splice(0).forEach((f) => f());
+          })
+          .catch(() => this.images.delete(bg.img));
+      }
+      if (!e.bmp && onready) e.waiters.push(onready);
+      return e.bmp;
+    }
+    if (!bg.pdf) return null;
+    // Render at a few fixed widths so zooming doesn't re-render constantly.
+    const want = [800, 1400, 2200, 3200].find((w) => w >= px) || 3200;
+    const key = `${bg.pdf}/${bg.n}/${want}`;
+    let e = this.renders.get(key);
+    if (!e) {
+      e = { canvas: null, waiters: [] };
+      this.renders.set(key, e);
+      this.order.push(key);
+      while (this.order.length > 14) this.renders.delete(this.order.shift());
+      this.#render(bg.pdf, bg.n, want)
+        .then((c) => {
+          e.canvas = c;
+          e.waiters.splice(0).forEach((f) => f());
+        })
+        .catch(() => this.renders.delete(key));
+    }
+    if (!e.canvas) {
+      if (onready) e.waiters.push(onready);
+      // Meanwhile, any rendered size of the same page will do.
+      for (const w of [3200, 2200, 1400, 800]) {
+        const other = this.renders.get(`${bg.pdf}/${bg.n}/${w}`);
+        if (other?.canvas) return other.canvas;
+      }
+    }
+    return e.canvas;
+  }
+  async #render(sha, n, width) {
+    const doc = await this.#doc(sha);
+    const page = await doc.getPage(n);
+    const vp1 = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: width / vp1.width });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width);
+    c.height = Math.round(vp.height);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    return c;
+  }
+  // Wait for a background (for export).
+  async load(page, px) {
+    for (let i = 0; i < 400; i++) {
+      const d = this.get(page, px);
+      if (d && (!page.bg?.pdf || d.width >= Math.min(px, 3200) * 0.99 || i > 300)) return d;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return this.get(page, px);
+  }
 }
 
 // ---------------------------------------------------------------- surface
@@ -276,17 +287,20 @@ export function loadImage(url, onload) {
 // Stacked canvases: paper/PDF, live window video, committed ink, and
 // in-progress strokes.
 export class Surface {
-  constructor(root, key) {
+  constructor(root, backgrounds) {
     this.root = root;
-    this.key = key;
+    this.backgrounds = backgrounds;
     this.bg = this.#canvas();
     this.media = this.#canvas();
     this.ink = this.#canvas();
     this.live = this.#canvas();
     this.page = null;
     this.active = new Map(); // stroke id -> stroke still being drawn
+    this.hidden = new Set(); // stroke ids not drawn on the ink layer (e.g. being moved)
     this.view = { s: 1, x: 0, y: 0 }; // page unit -> css px
     this.dpr = 1;
+    this.cw = 0;
+    this.ch = 0;
     this.liveQueued = false;
     this.frame = null; // latest live-window frame (ImageBitmap)
     this.decoding = false;
@@ -310,11 +324,20 @@ export class Surface {
       c.style.height = r.height + 'px';
     }
   }
+  fitScale(page = this.page, margin = 16) {
+    return page ? Math.max(0.01, Math.min((this.cw - margin * 2) / page.w, (this.ch - margin * 2) / page.h)) : 1;
+  }
   fit(page = this.page, margin = 16) {
     if (!page) return;
-    // Clamp: the stage can be 0x0 while hidden or mid-rotation.
-    const s = Math.max(0.01, Math.min((this.cw - margin * 2) / page.w, (this.ch - margin * 2) / page.h));
+    const s = this.fitScale(page, margin);
     this.view = { s, x: (this.cw - page.w * s) / 2, y: (this.ch - page.h * s) / 2 };
+  }
+  // Fit the page width and start at its top (portrait notes pages).
+  fitWidth(page = this.page, margin = 16) {
+    if (!page) return;
+    const s = Math.max(0.01, Math.min((this.cw - margin * 2) / page.w, ((this.ch - margin * 2) / page.h) * 3));
+    this.view = { s, x: (this.cw - page.w * s) / 2, y: margin };
+    if (page.h * s < this.ch - margin * 2) this.view.y = (this.ch - page.h * s) / 2;
   }
   toPage(cx, cy) {
     return [(cx - this.view.x) / this.view.s, (cy - this.view.y) / this.view.s];
@@ -327,6 +350,9 @@ export class Surface {
     return ctx;
   }
   setPage(page) {
+    if (page !== this.page) {
+      this.frameFor = null;
+    }
     this.page = page;
     this.redraw();
   }
@@ -385,8 +411,7 @@ export class Surface {
     ctx.fillRect(0, 0, page.w * k, page.h * k);
     ctx.shadowColor = 'transparent';
     drawPaper(ctx, page, k);
-    const url = pageImageURL(page, this.key);
-    const img = loadImage(url, () => this.page === page && this.drawBg());
+    const img = this.backgrounds?.get(page, page.w * k * this.dpr, () => this.page === page && this.drawBg());
     if (img) {
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, page.w * k, page.h * k);
@@ -395,7 +420,7 @@ export class Surface {
   drawInk() {
     const ctx = this.#prep(this.ink);
     if (!this.page) return;
-    for (const s of this.page.strokes) if (!this.active.has(s.id)) drawStroke(ctx, s, this.view.s);
+    for (const s of this.page.strokes) if (!this.active.has(s.id) && !this.hidden.has(s.id)) drawStroke(ctx, s, this.view.s);
   }
   commit(s) {
     this.active.delete(s.id);
@@ -419,87 +444,108 @@ export class Surface {
   }
 }
 
-// ---------------------------------------------------------------- document helpers
-
-export function indexDoc(doc) {
-  const pages = new Map(), strokes = new Map();
-  for (const p of doc.pages) {
-    pages.set(p.id, p);
-    for (const s of p.strokes) strokes.set(s.id, s);
-  }
-  return { pages, strokes };
-}
-
-// Apply a relayed op to a local doc copy. Returns the affected page.
-export function applyOp(doc, idx, msg) {
-  const page = idx.pages.get(msg.page);
-  switch (msg.t) {
-    case 'begin': {
-      if (!page || idx.strokes.has(msg.s.id)) return null;
-      const s = { ...msg.s, pts: [...(msg.s.pts || [])] };
-      page.strokes.push(s);
-      idx.strokes.set(s.id, s);
-      return page;
-    }
-    case 'pts': {
-      const s = idx.strokes.get(msg.id);
-      if (s) s.pts.push(...msg.pts);
-      return null;
-    }
-    case 'remove': {
-      if (!page) return null;
-      const ids = new Set(msg.ids);
-      page.strokes = page.strokes.filter((s) => !ids.has(s.id));
-      ids.forEach((i) => idx.strokes.delete(i));
-      return page;
-    }
-    case 'restore': {
-      if (!page) return null;
-      for (const s of msg.strokes) {
-        if (idx.strokes.has(s.id)) continue;
-        page.strokes.push(s);
-        idx.strokes.set(s.id, s);
-      }
-      page.strokes.sort((a, b) => (a.z || 0) - (b.z || 0));
-      return page;
-    }
-    case 'paper':
-      if (page) page.paper = msg.paper;
-      return page;
-    case 'goto':
-      doc.page = msg.index;
-      return null;
-  }
-  return null;
-}
-
 // ---------------------------------------------------------------- PDF export
 
-async function renderPageJPEG(page, key, px = 1800) {
-  const k = px / page.w;
-  const c = document.createElement('canvas');
-  c.width = Math.round(page.w * k);
-  c.height = Math.round(page.h * k);
-  const ctx = c.getContext('2d');
-  drawPaper(ctx, page, k);
-  // A live window exports its current frame.
-  const url = page.bg?.live
-    ? `/api/live/frame.jpg?k=${encodeURIComponent(key)}&t=${Date.now()}`
-    : pageImageURL(page, key);
-  if (url) {
-    const img = loadImage(url) || (await new Promise((res) => {
-      loadImage(url, () => res(loadImage(url)));
-      setTimeout(() => res(null), 8000); // e.g. no frame yet
-    }));
-    if (img) ctx.drawImage(img, 0, 0, c.width, c.height);
+const f2 = (v) => (Math.round(v * 100) / 100).toString();
+
+function pdfString(text) {
+  if (/^[\x20-\x7e]*$/.test(text)) return '(' + text.replace(/[\\()]/g, (c) => '\\' + c) + ')';
+  let hex = 'FEFF';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    const units = cp > 0xffff ? [0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff)] : [cp];
+    for (const u of units) hex += u.toString(16).padStart(4, '0').toUpperCase();
   }
-  for (const s of page.strokes) drawStroke(ctx, s, k);
-  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.9));
-  return { bytes: new Uint8Array(await blob.arrayBuffer()), wpx: c.width, hpx: c.height };
+  return `<${hex}>`;
 }
 
-// Minimal PDF writer: one full-page JPEG per page.
-export async function exportPDF(doc, key, name = 'inkcast') {
+function rgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => f2(v / 255)).join(' ');
+}
+
+// Ink as PDF path operators, in page units (the page's `cm` maps them).
+function inkOps(page) {
+  const out = ['1 J 1 j'];
+  for (const s of page.strokes) {
+    const p = s.pts;
+    if (!p?.length) continue;
+    const c = rgb(s.color);
+    if (s.tool === 'hl') {
+      out.push(`q /HL gs ${c} RG ${f2(s.width)} w ${f2(p[0][0])} ${f2(p[0][1])} m`);
+      for (const g of segments(p)) {
+        if (g.line) out.push(`${f2(g.x1)} ${f2(g.y1)} l`);
+        else out.push(cubic(g));
+      }
+      if (p.length === 1) out.push(`${f2(p[0][0] + 0.01)} ${f2(p[0][1])} l`);
+      out.push('S Q');
+      continue;
+    }
+    if (p.length === 1) {
+      const r = pressureWidth(s.width, p[0][2]) / 2;
+      out.push(`${c} rg ${circle(p[0][0], p[0][1], r)} f`);
+      continue;
+    }
+    out.push(`${c} RG`);
+    let lastW = null;
+    for (const g of segments(p)) {
+      const w = f2(pressureWidth(s.width, g.pr));
+      if (w !== lastW) out.push(`${w} w`);
+      lastW = w;
+      out.push(`${f2(g.x0)} ${f2(g.y0)} m ${g.line ? `${f2(g.x1)} ${f2(g.y1)} l` : cubic(g)} S`);
+    }
+  }
+  return out.join('\n');
+}
+
+function cubic(g) {
+  const c1x = g.x0 + (2 / 3) * (g.cx - g.x0), c1y = g.y0 + (2 / 3) * (g.cy - g.y0);
+  const c2x = g.x1 + (2 / 3) * (g.cx - g.x1), c2y = g.y1 + (2 / 3) * (g.cy - g.y1);
+  return `${f2(c1x)} ${f2(c1y)} ${f2(c2x)} ${f2(c2y)} ${f2(g.x1)} ${f2(g.y1)} c`;
+}
+
+function circle(x, y, r) {
+  const k = 0.5523 * r;
+  return `${f2(x + r)} ${f2(y)} m ${f2(x + r)} ${f2(y + k)} ${f2(x + k)} ${f2(y + r)} ${f2(x)} ${f2(y + r)} c ` +
+    `${f2(x - k)} ${f2(y + r)} ${f2(x - r)} ${f2(y + k)} ${f2(x - r)} ${f2(y)} c ` +
+    `${f2(x - r)} ${f2(y - k)} ${f2(x - k)} ${f2(y - r)} ${f2(x)} ${f2(y - r)} c ` +
+    `${f2(x + k)} ${f2(y - r)} ${f2(x + r)} ${f2(y - k)} ${f2(x + r)} ${f2(y)} c`;
+}
+
+function paperOps(page) {
+  if (page.bg) return '';
+  if (page.paper === 'dots') {
+    const out = ['0.725 0.753 0.8 rg'];
+    for (let y = 32; y < page.h; y += 32) for (let x = 32; x < page.w; x += 32) out.push(`${circle(x, y, 1.6)} f`);
+    return out.join('\n');
+  }
+  return paperLines(page).map(([x0, y0, x1, y1, color, lw]) =>
+    `${rgb(color)} RG ${f2(lw)} w ${f2(x0)} ${f2(y0)} m ${f2(x1)} ${f2(y1)} l S`).join('\n');
+}
+
+async function deflate(bytes) {
+  if (typeof CompressionStream === 'undefined') return null;
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function jpegOf(drawable, maxW = 2000) {
+  const k = Math.min(1, maxW / drawable.width);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(drawable.width * k));
+  c.height = Math.max(1, Math.round(drawable.height * k));
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(drawable, 0, 0, c.width, c.height);
+  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.86));
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height };
+}
+
+// Build a PDF of `pages`. Ink and paper are vectors; PDF and window
+// backgrounds are embedded as images. `outline` is [{title, index}] bookmarks.
+// `liveFrame` is the current frame of a live window, if one is on the pages.
+export async function buildPDF(pages, { backgrounds, outline = [], title = 'OpenPad', liveFrame = null, onprogress } = {}) {
   const enc = new TextEncoder();
   const chunks = [];
   const offsets = [];
@@ -509,54 +555,116 @@ export async function exportPDF(doc, key, name = 'inkcast') {
     chunks.push(b);
     pos += b.length;
   };
-  const n = doc.pages.length;
-  // objects: 1 catalog, 2 pages, then per page i: page, content, image
-  const pageObj = (i) => 3 + i * 3;
-  put('%PDF-1.4\n%\xC7\xEC\x8F\xA2\n');
-  offsets[1] = pos;
-  put('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-  offsets[2] = pos;
-  put(`2 0 obj\n<< /Type /Pages /Count ${n} /Kids [${doc.pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ')}] >>\nendobj\n`);
-  for (let i = 0; i < n; i++) {
-    const page = doc.pages[i];
-    const img = await renderPageJPEG(page, key);
-    const [w, h] = page.pt || [960, 960 * (page.h / page.w)];
-    const po = pageObj(i);
-    offsets[po] = pos;
-    put(`${po} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im0 ${po + 2} 0 R >> >> /Contents ${po + 1} 0 R >>\nendobj\n`);
-    const content = `q ${w} 0 0 ${h} 0 0 cm /Im0 Do Q`;
-    offsets[po + 1] = pos;
-    put(`${po + 1} 0 obj\n<< /Length ${content.length} >>\nstream\n${content}\nendstream\nendobj\n`);
-    offsets[po + 2] = pos;
-    put(`${po + 2} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${img.wpx} /Height ${img.hpx} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${img.bytes.length} >>\nstream\n`);
-    put(img.bytes);
+  let next = 1;
+  const alloc = () => next++;
+  const CATALOG = alloc(), PAGES = alloc(), GS = alloc(), INFO = alloc();
+  const OUTLINES = outline.length ? alloc() : 0;
+  const pageIds = pages.map(() => alloc());
+  const obj = (id, body) => {
+    offsets[id] = pos;
+    put(`${id} 0 obj\n${body}\nendobj\n`);
+  };
+  const stream = async (id, dict, data) => {
+    const raw = typeof data === 'string' ? enc.encode(data) : data;
+    const z = dict.includes('/Filter') ? null : await deflate(raw);
+    offsets[id] = pos;
+    put(`${id} 0 obj\n<< ${dict}${z ? ' /Filter /FlateDecode' : ''} /Length ${(z || raw).length} >>\nstream\n`);
+    put(z || raw);
     put('\nendstream\nendobj\n');
+  };
+  put('%PDF-1.5\n%\xC7\xEC\x8F\xA2\n');
+  obj(CATALOG, `<< /Type /Catalog /Pages ${PAGES} 0 R${OUTLINES ? ` /Outlines ${OUTLINES} 0 R /PageMode /UseOutlines` : ''} >>`);
+  obj(PAGES, `<< /Type /Pages /Count ${pages.length} /Kids [${pageIds.map((i) => `${i} 0 R`).join(' ')}] >>`);
+  obj(GS, '<< /Type /ExtGState /CA 0.32 /ca 0.32 /BM /Multiply >>');
+  obj(INFO, `<< /Title ${pdfString(title)} /Producer (OpenPad) >>`);
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    onprogress?.(i, pages.length);
+    const [W, H] = page.pt || [612, 612 * (page.h / page.w)];
+    const k = W / page.w;
+    const contentId = alloc();
+    let image = null;
+    if (page.bg) {
+      let d = null;
+      if (page.bg.live) d = liveFrame;
+      else if (backgrounds) d = await backgrounds.load(page, 1700);
+      if (d) image = { id: alloc(), ...(await jpegOf(d)) };
+    }
+    const content = [
+      `q ${f2(k)} 0 0 ${f2(-k)} 0 ${f2(H)} cm`,
+      page.bg?.live ? `0 0 0 rg 0 0 ${f2(page.w)} ${f2(page.h)} re f` : '',
+      image ? `q ${f2(page.w)} 0 0 ${f2(-page.h)} 0 ${f2(page.h)} cm /Im0 Do Q` : paperOps(page),
+      inkOps(page),
+      'Q',
+    ].join('\n');
+    obj(pageIds[i], `<< /Type /Page /Parent ${PAGES} 0 R /MediaBox [0 0 ${f2(W)} ${f2(H)}] ` +
+      `/Resources << /ExtGState << /HL ${GS} 0 R >>${image ? ` /XObject << /Im0 ${image.id} 0 R >>` : ''} >> ` +
+      `/Contents ${contentId} 0 R >>`);
+    await stream(contentId, '', content);
+    if (image) {
+      await stream(image.id, `/Type /XObject /Subtype /Image /Width ${image.w} /Height ${image.h} ` +
+        '/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode', image.bytes);
+    }
   }
-  const count = 3 + n * 3;
+  if (OUTLINES) {
+    const items = outline.map(() => alloc());
+    obj(OUTLINES, `<< /Type /Outlines /First ${items[0]} 0 R /Last ${items[items.length - 1]} 0 R /Count ${items.length} >>`);
+    outline.forEach((o, i) => {
+      const H = (pages[o.index]?.pt || [0, 792])[1];
+      obj(items[i], `<< /Title ${pdfString(o.title)} /Parent ${OUTLINES} 0 R` +
+        (i ? ` /Prev ${items[i - 1]} 0 R` : '') + (i < items.length - 1 ? ` /Next ${items[i + 1]} 0 R` : '') +
+        ` /Dest [${pageIds[o.index]} 0 R /XYZ 0 ${f2(H)} 0] >>`);
+    });
+  }
+  const count = next;
   const xref = pos;
   let x = `xref\n0 ${count}\n0000000000 65535 f \n`;
   for (let i = 1; i < count; i++) x += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
   put(x);
-  put(`trailer\n<< /Size ${count} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
-  const blob = new Blob(chunks, { type: 'application/pdf' });
+  put(`trailer\n<< /Size ${count} /Root ${CATALOG} 0 R /Info ${INFO} 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return new Blob(chunks, { type: 'application/pdf' });
+}
+
+// Let the person choose where the PDF goes: a save dialog (Chrome, Edge), the
+// share sheet (iPad: "Save to Files" picks any folder), or a plain download.
+export async function savePDF(blob, filename) {
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+      const w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      return 'saved';
+    } catch (e) {
+      if (e.name === 'AbortError') return 'cancelled';
+    }
+  }
+  const file = new File([blob], filename, { type: 'application/pdf' });
+  const touch = matchMedia('(pointer: coarse)').matches;
+  if (touch && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return 'shared';
+    } catch (e) {
+      if (e.name === 'AbortError') return 'cancelled';
+    }
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${name.replace(/\.pdf$/i, '')}-inkcast-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.pdf`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
     URL.revokeObjectURL(a.href);
     a.remove();
-  }, 5000);
+  }, 10000);
+  return 'downloaded';
 }
 
-export async function uploadPDF(file, key) {
-  const r = await fetch(`/api/pdf?name=${encodeURIComponent(file.name)}&k=${encodeURIComponent(key)}`, {
-    method: 'POST',
-    body: file,
-    headers: { 'Content-Type': 'application/pdf' },
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || `upload failed (${r.status})`);
-  return j;
+export function pdfName(title) {
+  const clean = (title || 'notes').replace(/[\\/:*?"<>|\x00-\x1f]/g, '').trim().slice(0, 80) || 'notes';
+  return `${clean}.pdf`;
 }

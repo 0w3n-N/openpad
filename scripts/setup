@@ -1,23 +1,24 @@
 #!/bin/bash
-# Inkcast setup. Every step explains itself and asks first; nothing changes
+# OpenPad setup. Every step explains itself and asks first; nothing changes
 # unless you answer yes. Safe to run again at any time.
 #
-#   1. Install helpers: poppler (PDFs) and the window-capture packages
-#   2. Optional AirPlay mirroring: UxPlay (AUR) and avahi-daemon (discovery)
-#   3. Open the firewall (ufw) for private home/office networks only
-#   4. Optional: an `inkcast` command and app-launcher entries
+#   1. Install the window-capture packages (desktop annotation)
+#   2. Optional: cloudflared, for internet links you can send to guests
+#   3. Optional AirPlay mirroring: UxPlay (AUR) and avahi-daemon (discovery)
+#   4. Open the firewall (ufw) for private home/office networks only
+#   5. Optional: an `openpad` command and app-launcher entries
 #
-# Only steps 1-3 use sudo, and only for pacman/yay, `ufw allow`, and
+# Only steps 1-4 use sudo, and only for pacman/yay, `ufw allow/delete`, and
 # `systemctl enable avahi-daemon`. Undo with scripts/uninstall.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${INKCAST_PORT:-8770}"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/inkcast"
+PORT="${OPENPAD_PORT:-8770}"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/openpad"
 BIN_DIR="$HOME/.local/bin"
 APP_DIR="$HOME/.local/share/applications"
-UFW_COMMENT="inkcast"
+UFW_COMMENT="openpad"
 PRIVATE_CIDRS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16)
 # UxPlay is started with -p: TCP 7000 7001 7100, UDP 6000 6001 7011; mDNS is UDP 5353.
 MIRROR_TCP=(7000 7001 7100)
@@ -35,23 +36,45 @@ ask() {
 }
 
 if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT > 65535)); then
-  echo "INKCAST_PORT must be a number between 1024 and 65535" >&2
+  echo "OPENPAD_PORT must be a number between 1024 and 65535" >&2
   exit 1
 fi
 
-echo "Inkcast setup. Each step asks before changing anything."
+echo "OpenPad setup. Each step asks before changing anything."
+
+# OpenPad used to be called Inkcast. Its command, launcher entries and ufw
+# rules are replaced by the ones below; its notebook moves over by itself.
+old_bits=()
+[[ -L "$BIN_DIR/inkcast" ]] && old_bits+=("$BIN_DIR/inkcast")
+for f in "$APP_DIR/inkcast.desktop" "$APP_DIR/inkcast-mirror.desktop" "$APP_DIR/icons/Inkcast.png"; do
+  [[ -e $f ]] && old_bits+=("$f")
+done
+if ((${#old_bits[@]})); then
+  bold "Inkcast leftovers"
+  printf '  %s\n' "${old_bits[@]}"
+  if ask "Remove these (OpenPad replaces them)?"; then
+    rm -f -- "${old_bits[@]}"
+  fi
+fi
+if have ufw && sudo -n true 2>/dev/null && sudo ufw status | grep -q '# inkcast$'; then
+  if ask "Remove the old firewall rules tagged 'inkcast' (new ones are added in step 4)?"; then
+    while n=$(sudo ufw status numbered | awk -F'[][]' '/# inkcast$/ {print $2; exit}' | tr -d ' ') && [[ -n $n ]]; do
+      sudo ufw --force delete "$n" >/dev/null
+    done
+  fi
+fi
 
 # --------------------------------------------------------------------- macOS
 
 if [[ "$(uname)" == "Darwin" ]]; then
   bold "macOS"
-  have pdftoppm || echo "For writing on PDFs, run: brew install poppler"
+  have cloudflared || echo "For internet links you can send to guests (optional): brew install cloudflared"
   echo "For screen mirroring, use the built-in AirPlay Receiver:"
   echo "System Settings > General > AirDrop & Handoff > AirPlay Receiver."
-  if ask "Add the 'inkcast' command to $BIN_DIR?"; then
+  if ask "Add the 'openpad' command to $BIN_DIR?"; then
     mkdir -p "$BIN_DIR"
-    ln -sfn "$ROOT/bin/inkcast" "$BIN_DIR/inkcast"
-    echo "Done. Run: inkcast"
+    ln -sfn "$ROOT/bin/openpad" "$BIN_DIR/openpad"
+    echo "Done. Run: openpad"
   fi
   exit 0
 fi
@@ -71,15 +94,14 @@ install_pkgs() {
 }
 
 missing=()
-have pdftoppm && have pdfinfo || missing+=(poppler)
 # Desktop annotation (window capture through the screen-share portal).
-for pkg in $(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from inkcast.capture import missing_dependencies as m; print(" ".join(m()))' "$ROOT" 2>/dev/null); do
+for pkg in $(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from openpad.capture import missing_dependencies as m; print(" ".join(m()))' "$ROOT" 2>/dev/null); do
   missing+=("$pkg")
 done
-bold "1. Helpers"
+bold "1. Window capture (desktop annotation)"
 if ((${#missing[@]})); then
   echo "Missing: ${missing[*]}"
-  echo "(poppler opens PDFs; the GStreamer/GObject packages capture windows for desktop annotation)"
+  echo "(the GStreamer/GObject packages capture a desktop window to show on the iPad)"
   if ask "Install ${missing[*]} from the Arch repositories?"; then
     install_pkgs "${missing[@]}"
   fi
@@ -87,9 +109,22 @@ else
   echo "Everything needed is installed."
 fi
 
-# --------------------------------------------------------------------- 2. AirPlay
+# --------------------------------------------------------------------- 2. internet links
 
-bold "2. AirPlay screen mirroring (optional)"
+bold "2. Internet links for guests (optional)"
+if have cloudflared; then
+  echo "cloudflared is installed."
+else
+  echo "Guests on your Wi-Fi can always join. To send links to people elsewhere (e.g. on a call),"
+  echo "OpenPad can use a free Cloudflare quick tunnel, only while you switch it on."
+  if ask "Install cloudflared?" n; then
+    install_pkgs cloudflared
+  fi
+fi
+
+# --------------------------------------------------------------------- 3. AirPlay
+
+bold "3. AirPlay screen mirroring (optional)"
 if have uxplay; then
   echo "UxPlay is installed."
 elif ask "Install UxPlay so the iPad can mirror its whole screen over AirPlay? (AUR package, builds locally)" n; then
@@ -110,15 +145,15 @@ if have uxplay && have systemctl && ! systemctl is-active --quiet avahi-daemon; 
   fi
 fi
 
-# --------------------------------------------------------------------- 3. firewall
+# --------------------------------------------------------------------- 4. firewall
 
-bold "3. Firewall"
+bold "4. Firewall"
 if ! have ufw || ! systemctl is-active --quiet ufw 2>/dev/null; then
   echo "ufw is not active, so nothing blocks the iPad. Nothing to do."
 else
   lan_subnet="$(ip -4 -o route show scope link 2>/dev/null | awk '$1 ~ /^(10|172|192)\./ && $3 !~ /^(tun|wg|proton|tailscale|docker|br-|veth|virbr)/ {print $1; exit}')"
   echo "ufw blocks incoming connections, including from your iPad."
-  echo "Inkcast needs TCP $PORT (whiteboard)$(have uxplay && echo ", plus TCP ${MIRROR_TCP[*]} and UDP ${MIRROR_UDP[*]} (AirPlay)")."
+  echo "OpenPad needs TCP $PORT (notes, sync and live sessions)$(have uxplay && echo ", plus TCP ${MIRROR_TCP[*]} and UDP ${MIRROR_UDP[*]} (AirPlay)")."
   echo "Rules are limited to private network ranges; the internet can't reach these ports."
   echo
   echo "  1) Any private network (home, office, campus): ${PRIVATE_CIDRS[*]}"
@@ -148,38 +183,38 @@ else
   fi
 fi
 
-# --------------------------------------------------------------------- 4. extras
+# --------------------------------------------------------------------- 5. extras
 
-bold "4. Extras (optional)"
-if ask "Add an 'inkcast' terminal command to $BIN_DIR?" n; then
+bold "5. Extras (optional)"
+if ask "Add an 'openpad' terminal command to $BIN_DIR?" n; then
   mkdir -p "$BIN_DIR"
-  ln -sfn "$ROOT/bin/inkcast" "$BIN_DIR/inkcast"
-  echo "Added $BIN_DIR/inkcast"
+  ln -sfn "$ROOT/bin/openpad" "$BIN_DIR/openpad"
+  echo "Added $BIN_DIR/openpad"
 fi
-if ask "Add Inkcast to the app launcher (Super + Space)?" n; then
+if ask "Add OpenPad to the app launcher (Super + Space)?" n; then
   mkdir -p "$APP_DIR/icons"
-  cp "$ROOT/assets/icon-256.png" "$APP_DIR/icons/Inkcast.png"
-  cat >"$APP_DIR/inkcast.desktop" <<EOF
+  cp "$ROOT/assets/icon-256.png" "$APP_DIR/icons/OpenPad.png"
+  cat >"$APP_DIR/openpad.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Inkcast
-GenericName=Apple Pencil Whiteboard
-Comment=Write on your iPad and show it live in a window you can screen-share
-Exec="$ROOT/bin/inkcast" board
-Icon=$APP_DIR/icons/Inkcast.png
+Name=OpenPad
+GenericName=iPad Notes
+Comment=Notes from your iPad and Apple Pencil, synced and shown live in a window you can screen-share
+Exec="$ROOT/bin/openpad" board
+Icon=$APP_DIR/icons/OpenPad.png
 Terminal=false
 Categories=Education;Office;Graphics;
-Keywords=ipad;pencil;whiteboard;draw;notes;pdf;annotate;
+Keywords=ipad;pencil;whiteboard;draw;notes;pdf;annotate;notebook;
 EOF
   if have uxplay; then
-    cat >"$APP_DIR/inkcast-mirror.desktop" <<EOF
+    cat >"$APP_DIR/openpad-mirror.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Inkcast Mirror
+Name=OpenPad Mirror
 GenericName=AirPlay Receiver
 Comment=Mirror your iPad or iPhone screen into a window
-Exec="$ROOT/bin/inkcast" mirror
-Icon=$APP_DIR/icons/Inkcast.png
+Exec="$ROOT/bin/openpad" mirror
+Icon=$APP_DIR/icons/OpenPad.png
 Terminal=true
 Categories=AudioVideo;Video;
 Keywords=airplay;mirror;ipad;iphone;screen;uxplay;
@@ -189,4 +224,4 @@ EOF
 fi
 
 bold "Done"
-"$ROOT/bin/inkcast" doctor || true
+"$ROOT/bin/openpad" doctor || true

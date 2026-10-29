@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Inkcast icons.
+"""Generate the OpenPad icons.
 
 The mark is a penguin whose body is an apple and whose belly is a tablet
 screen, with a stylus writing on it: Linux + iPad + Pencil in one shape.
@@ -7,7 +7,7 @@ The apple is a generic fruit (no bite), not Apple's logo.
 
 Outputs (in assets/):
   icon.svg        full-color app icon (also copied to web/icon.svg)
-  icon-mono.svg   single-path glyph, used for the bar icon (InkcastIcon.qml)
+  icon-mono.svg   single-path glyph, used for the bar icon (OpenPadIcon.qml)
   icon-256/512.png raster sizes (web/icon.png is the 180px iOS home-screen icon)
 
 Requires Inkscape (for the boolean path ops) and rsvg-convert.
@@ -201,7 +201,7 @@ def main():
         subprocess.run(["magick", "-background", "none", str(HERE / "icon.svg"),
                         "-define", "icon:auto-resize=256,64,48,32,16", str(HERE / "icon.ico")], check=True)
     # The QML glyph uses the same path.
-    qml = ROOT / "InkcastIcon.qml"
+    qml = ROOT / "OpenPadIcon.qml"
     if qml.exists():
         text = qml.read_text()
         text = re.sub(r'(readonly property string glyph: ")[^"]*(")', lambda m: m.group(1) + glyph + m.group(2), text)

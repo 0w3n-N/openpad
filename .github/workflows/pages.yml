@@ -1,0 +1,43 @@
+name: pages
+
+# Publishes the installable notes app (web/) to GitHub Pages:
+# https://0w3n-n.github.io/openpad/ — the iPad caches it and works offline.
+# Only the app's own files are published; the computer's share window, guest
+# and setup pages are served by OpenPad itself.
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Collect the app's files
+        run: |
+          mkdir -p _site/vendor/pdfjs
+          cp web/app.html _site/index.html
+          cp web/app.html web/app.js web/editor.js web/ink.js web/link.js web/model.js web/store.js \
+             web/style.css web/sw.js web/manifest.webmanifest web/icon.svg web/icon.png _site/
+          cp web/vendor/pdfjs/pdf.min.mjs web/vendor/pdfjs/pdf.worker.min.mjs web/vendor/pdfjs/LICENSE _site/vendor/pdfjs/
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

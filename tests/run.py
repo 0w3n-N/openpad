@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Inkcast test suite: security, protocol and desktop annotation.
+"""OpenPad test suite: security, sync, guests, live sessions and annotation.
 
 Runs a real server on a free port with throwaway data directories; touches
-nothing in your home folder. Needs poppler (pdfinfo/pdftoppm). The desktop
-annotation tests use GStreamer's test pattern instead of a real window.
+nothing in your home folder. The desktop annotation tests use GStreamer's test
+pattern instead of a real window (skipped without GStreamer). The notebook
+merge rules are checked against web/model.js when Node is installed.
 
     python3 -B tests/run.py
 """
 
 import base64
+import copy
+import hashlib
 import json
+import random
+import ssl
+import subprocess
 import os
 import shutil
 import socket
@@ -22,9 +28,10 @@ import time
 
 sys.dont_write_bytecode = True
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TMP = tempfile.mkdtemp(prefix="inkcast-test-")
+TMP = tempfile.mkdtemp(prefix="openpad-test-")
 os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "data")
 os.environ["XDG_RUNTIME_DIR"] = os.path.join(TMP, "run")
+os.environ["OPENPAD_NOTES"] = os.path.join(TMP, "notes")
 os.makedirs(os.environ["XDG_RUNTIME_DIR"], mode=0o700)
 sys.path.insert(0, ROOT)
 
@@ -114,19 +121,21 @@ class FakeCapture:
         on_end("stopped")
 
 
-import inkcast.capture as capture  # noqa: E402
+import openpad.capture as capture  # noqa: E402
 
 capture.WindowCapture = FakeCapture
 capture.missing_dependencies = lambda: [] if HAVE_GST else ["gstreamer"]
 
-from inkcast.server import Hub, InkcastServer, write_private  # noqa: E402
+from openpad import notebook as N  # noqa: E402
+from openpad.server import APP_ORIGIN, Hub, OpenPadServer, write_private  # noqa: E402
+from openpad.store import Store  # noqa: E402
 
 PORT = free_port()
-srv = InkcastServer("127.0.0.1", PORT)
+srv = OpenPadServer("127.0.0.1", PORT)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 KEY = srv.token
-DATA = os.path.join(os.environ["XDG_DATA_HOME"], "inkcast")
-RUN = os.path.join(os.environ["XDG_RUNTIME_DIR"], "inkcast")
+DATA = os.path.join(os.environ["XDG_DATA_HOME"], "openpad")
+RUN = os.path.join(os.environ["XDG_RUNTIME_DIR"], "openpad")
 
 # --------------------------------------------------------------------------- clients
 
@@ -244,17 +253,109 @@ def wait_live_state(timeout=8):
         time.sleep(0.1)
 
 
+# --------------------------------------------------------------------------- notebooks
+
+
+def nb_with(n_pages=2, title="Physics"):
+    nb = N.new_notebook(title, "letter", "Lecture 1")
+    sec = nb["layout"]["sections"][0]
+    for _ in range(n_pages - 1):
+        p = N.blank_page(sec["id"])
+        nb["pages"][p["id"]] = p
+        sec["pages"].append(p["id"])
+    return nb
+
+
+def stroke(sid=None, n=3, **kw):
+    return {"id": sid or N.new_id(), "z": time.time() * 1000, "tool": "pen", "color": "#111111", "width": 3.5,
+            "pts": [[10 + i, 20 + i, 0.5] for i in range(n)], **kw}
+
+
+print("== notebook merge rules")
+a = nb_with(2)
+p1, p2 = N.order(a)
+b = copy.deepcopy(a)
+a["pages"][p1]["strokes"].append(N.clean_stroke(stroke("s1")))
+b["pages"][p1]["strokes"].append(N.clean_stroke(stroke("s2")))
+b["pages"][p1]["gone"].append("s1")
+m1, m2 = N.merge(copy.deepcopy(a), copy.deepcopy(b)), N.merge(copy.deepcopy(b), copy.deepcopy(a))
+check("merge is order-independent", N.digest(m1) == N.digest(m2) and m1 == m2)
+check("ink from both sides survives, removals win",
+      [s["id"] for s in m1["pages"][p1]["strokes"]] == ["s2"] and m1["pages"][p1]["gone"] == ["s1"])
+check("merging a copy into itself changes nothing", N.merge(copy.deepcopy(m1), copy.deepcopy(m1)) == m1)
+c = copy.deepcopy(a)
+c["goneP"].append(p2)
+c["layout"] = {"t": N.now_ms() + 5, "sections": [{**c["layout"]["sections"][0], "pages": [p1]}]}
+d = copy.deepcopy(a)
+p3 = N.blank_page(d["layout"]["sections"][0]["id"], t=N.now_ms() + 9)
+d["pages"][p3["id"]] = p3
+m = N.merge(c, d)
+check("deleted pages stay deleted", p2 not in m["pages"] and p2 not in N.order(m))
+check("a page added elsewhere joins its section even under a newer layout", p3["id"] in N.order(m))
+e = copy.deepcopy(a)
+e["pages"][p1].update(paper="grid", t=N.now_ms() + 50)
+m = N.merge(a, e)
+check("page settings are last-writer-wins", m["pages"][p1]["paper"] == "grid")
+check("digest changes with content", N.digest(m) != N.digest(a))
+bad = N.clean_notebook({"id": "x1", "title": "<b>\x00hi", "pages": {"p": {"id": "p", "h": "1", "bg": {"pdf": "../x", "n": 1},
+                        "strokes": [stroke("ok"), {"id": "../../x"}], "gone": ["ok", "a/b"]}},
+                        "layout": {"t": 1, "sections": [{"id": "s", "title": "x" * 500, "pages": ["p", "p", "../"]}]}})
+check("notebooks from clients are validated", bad and bad["title"] == "<b>hi" and bad["pages"]["p"]["bg"] is None
+      and bad["pages"]["p"]["strokes"] == [] and bad["pages"]["p"]["gone"] == ["ok"]
+      and bad["layout"]["sections"][0]["pages"] == ["p"] and len(bad["layout"]["sections"][0]["title"]) == 80, bad)
+
+if shutil.which("node"):
+    # The same random edits merged by Python and by web/model.js must agree.
+    rng = random.Random(7)
+    cases = []
+    for _ in range(25):
+        base = nb_with(rng.randint(1, 4))
+        x, y = copy.deepcopy(base), copy.deepcopy(base)
+        for side in (x, y):
+            ids = N.order(side)
+            for _ in range(rng.randint(0, 6)):
+                pg = side["pages"][rng.choice(ids)]
+                op = rng.random()
+                if op < 0.5:
+                    pg["strokes"].append(N.clean_stroke(stroke(n=rng.randint(1, 5))))
+                elif op < 0.7 and pg["strokes"]:
+                    s = rng.choice(pg["strokes"])
+                    pg["strokes"].remove(s)
+                    pg["gone"] = sorted(set(pg["gone"]) | {s["id"]})
+                elif op < 0.85:
+                    pg.update(paper=rng.choice(N.PAPERS), t=pg["t"] + rng.randint(1, 9))
+                else:
+                    np_ = N.blank_page(side["layout"]["sections"][0]["id"], t=N.now_ms() + rng.randint(0, 99))
+                    side["pages"][np_["id"]] = np_
+                    side["layout"] = {"t": side["layout"]["t"] + rng.randint(1, 9),
+                                      "sections": [{**side["layout"]["sections"][0],
+                                                    "pages": side["layout"]["sections"][0]["pages"] + [np_["id"]]}]}
+        cases.append([x, y])
+    expect = [(N.digest(m), N.order(m)) for m in (N.merge(copy.deepcopy(x), copy.deepcopy(y)) for x, y in cases)]
+    js = ("const fs = await import('node:fs'); const m = await import(process.argv[1]);"
+          "const cases = JSON.parse(fs.readFileSync(0, 'utf8')); const out = [];"
+          "for (const [x, y] of cases) { const r = m.merge(m.normalize(x), m.normalize(y)); out.push([await m.digest(r), m.order(r)]); }"
+          "console.log(JSON.stringify(out));")
+    r = subprocess.run(["node", "--input-type=module", "-e", js, "file://" + os.path.join(ROOT, "web", "model.js")],
+                       input=json.dumps(cases), capture_output=True, text=True, timeout=60)
+    got = json.loads(r.stdout) if r.returncode == 0 else None
+    check("web/model.js merges exactly like openpad/notebook.py",
+          got is not None and [tuple(g) for g in got] == [(d_, o) for d_, o in expect], r.stderr[-400:])
+else:
+    print("SKIP Node not installed (JS/Python merge parity)")
+
 # --------------------------------------------------------------------------- security
 
 print("== access control")
 code, _, body = http("GET", "/api/ping")
-check("ping works without key and leaks nothing", code == 200 and b"inkcast" in body and b"pid" not in body)
+check("ping works without key and leaks nothing", code == 200 and b"openpad" in body and b"pid" not in body)
 check("data needs the key", http("GET", "/api/info")[0] == 403)
 check("wrong key rejected", http("GET", "/api/info?k=AAAAAAAAAAAAAAAAAAAAAA")[0] == 403)
 check("key in query works", http("GET", f"/api/info?k={KEY}")[0] == 200)
-check("key in header works", http("GET", "/api/info", {"X-Inkcast-Key": KEY})[0] == 200)
-check("theme.css needs key", http("GET", "/theme.css")[0] == 403)
+check("key in header works", http("GET", "/api/info", {"X-OpenPad-Key": KEY})[0] == 200)
+check("theme.css needs a key", http("GET", "/theme.css")[0] == 403)
 check("qr needs key", http("GET", "/api/qr.svg")[0] == 403)
+check("sync needs key", http("GET", "/api/sync")[0] == 403 and http("POST", "/api/sync/nb", body=b"{}")[0] == 403)
 check("key is 128-bit", len(KEY) >= 22)
 
 print("== DNS rebinding / cross-site")
@@ -264,10 +365,20 @@ check("localhost Host accepted", http("GET", "/view", host=f"localhost:{PORT}")[
 check("ws without key rejected", ws("/ws?role=view")[1] == 403)
 check("ws from foreign Origin rejected", ws(f"/ws?role=view&k={KEY}", origin="https://evil.example")[1] == 403)
 check("ws from null Origin rejected", ws(f"/ws?role=view&k={KEY}", origin="null")[1] == 403)
-check("upload from foreign Origin rejected",
-      http("POST", f"/api/pdf?k={KEY}", {"Origin": "https://evil.example"}, b"%PDF-1.4")[0] == 403)
+check("sync from foreign Origin rejected",
+      http("POST", f"/api/sync/nb?k={KEY}", {"Origin": "https://evil.example"}, b"{}")[0] == 403)
 check("live start from foreign Origin rejected",
       http("POST", f"/api/live?k={KEY}", {"Origin": "https://evil.example"}, b'{"action":"start"}')[0] == 403)
+
+print("== the installed app's origin (CORS)")
+code, h, _ = http("OPTIONS", "/api/sync", {"Origin": APP_ORIGIN, "Access-Control-Request-Method": "POST"})
+check("preflight from the app's origin allows what sync sends",
+      code == 204 and h.get("access-control-allow-origin") == APP_ORIGIN
+      and {"X-OpenPad-Key", "X-OpenPad-Digest", "Content-Type"} <= set(map(str.strip, h.get("access-control-allow-headers", "").split(","))))
+check("preflight from other origins refused", http("OPTIONS", "/api/sync", {"Origin": "https://evil.example"})[0] == 403)
+code, h, _ = http("GET", f"/api/sync?k={KEY}", {"Origin": APP_ORIGIN})
+check("owner requests from the app's origin work", code == 200 and h.get("access-control-allow-origin") == APP_ORIGIN)
+check("other origins get no CORS header", "access-control-allow-origin" not in http("GET", f"/api/sync?k={KEY}")[1])
 
 print("== pages and files")
 code, h, page = http("GET", "/view")
@@ -276,31 +387,38 @@ check("strict CSP", "script-src 'self'" in csp and "style-src 'self'" in csp and
 check("nosniff, no-referrer, no framing",
       h.get("x-content-type-options") == "nosniff" and h.get("referrer-policy") == "no-referrer"
       and h.get("x-frame-options") == "DENY")
-check("no inline styles (CSP-clean)", b"style=" not in page and b"style=" not in http("GET", "/pad")[2])
-for p in ("/../inkcast/server.py", "/%2e%2e/inkcast/server.py", "/web/../inkcast/server.py", "//etc/passwd",
-          "/pad.html", "/server.py"):
+pages_html = [http("GET", p)[2] for p in ("/", "/view", "/join", "/setup")]
+check("no inline scripts or styles (CSP-clean)", all(b"style=" not in x and b"<script>" not in x for x in pages_html))
+check("pdf.js is served", http("GET", "/vendor/pdfjs/pdf.min.mjs")[0] == 200)
+for p in ("/../openpad/server.py", "/%2e%2e/openpad/server.py", "/web/../openpad/server.py", "//etc/passwd",
+          "/app.html", "/server.py", "/vendor/pdfjs/LICENSE", "/vendor/pdfjs/README.md"):
     check(f"no file outside the allowlist: {p}", http("GET", p)[0] in (403, 404))
 check("server header doesn't reveal Python", "python" not in http("GET", "/api/ping")[1].get("server", "").lower())
 
-print("== input validation")
+# --------------------------------------------------------------------------- live session
+
+print("== live session: validation")
 view, code = ws(f"/ws?role=view&k={KEY}", origin=f"http://127.0.0.1:{PORT}")
 check("ws with own Origin accepted", code == 101)
-pid = recv_until(view, "state")["doc"]["pages"][0]["id"]
+st = recv_until(view, "state")
+live_nb = st["nb"]
+pid = st["page"]
+check("the live notebook is sent on join", pid in live_nb["pages"] and st["role"] == "view")
 pad, _ = ws(f"/ws?role=pad&k={KEY}")
 recv_until(pad, "state")
 sid = "e" + os.urandom(4).hex()
-send(pad, {"t": "begin", "page": pid, "s": {"id": sid, "color": "red;background:url(x)", "width": 1e9,
+send(pad, {"t": "begin", "page": pid, "s": {"id": sid, "color": "red;background:url(x)", "width": 1e9, "by": "gfake",
            "tool": "<script>", "z": "x", "pts": [[1, 2, 0.5], ["a", 2], [1e300, 5, 9], None, "x"], "extra": 1}})
 s0 = recv_until(view, "begin").get("s", {})
 check("color sanitized", s0.get("color") == "#111111", s0)
 check("tool sanitized", s0.get("tool") == "pen")
 check("width clamped", s0.get("width") == 80)
-check("unknown keys dropped", "extra" not in s0)
+check("unknown keys dropped, owners can't claim a guest's id", "extra" not in s0 and "by" not in s0, s0)
 check("points validated and clamped", s0.get("pts") == [[1, 2, 0.5], [100000.0, 5, 1]], s0.get("pts"))
 for junk in ({"t": "pts", "id": sid, "pts": {"no": 1}}, {"t": "begin", "page": pid, "s": {"id": "../../etc"}},
-             {"t": "paper", "page": pid, "paper": "<img src=x>"}, {"t": "goto", "index": True},
-             {"t": "goto", "index": 10 ** 9}, {"t": "remove", "page": pid, "ids": "x"},
-             {"t": "live", "action": "rm -rf"}):
+             {"t": "merge", "nb": {"id": "../x"}}, {"t": "goto", "page": True}, {"t": "goto", "page": "nope"},
+             {"t": "remove", "page": pid, "ids": "x"}, {"t": "live", "action": "rm -rf"},
+             {"t": "open", "id": "../../etc"}, {"t": "addpdf", "sha": "0" * 64, "sizes": [[1, 1]]}):
     send(pad, junk)
 send(pad, b"not json")
 send(pad, b"[" * 100000 + b"]" * 100000)
@@ -320,12 +438,206 @@ recv_until(um, "state")
 send(um, {"t": "cursor"}, masked=False)
 check("unmasked client frame closes the connection", closed(um))
 
+print("== live session: structure")
+sec = live_nb["layout"]["sections"][0]
+newp = N.blank_page(sec["id"], "wide", "grid")
+layout = {"t": N.now_ms(), "sections": [{**sec, "pages": sec["pages"] + [newp["id"]]}]}
+send(pad, {"t": "merge", "nb": {"id": live_nb["id"], "layout": layout, "goneP": [], "pages": {newp["id"]: newp}}})
+m = recv_until(view, "merge")
+check("a new page reaches the share window", newp["id"] in m["nb"]["pages"] and newp["id"] in N.order(srv.hub.nb))
+send(pad, {"t": "goto", "page": newp["id"]})
+check("page changes are relayed", recv_until(view, "goto").get("page") == newp["id"] and srv.hub.page == newp["id"])
+send(view, {"t": "goto", "page": pid})
+check("the share window can turn pages too", recv_until(pad, "goto").get("page") == pid)
+
+# --------------------------------------------------------------------------- sync
+
+print("== sync")
+nb = nb_with(3, "Calculus")
+p1 = N.order(nb)[0]
+nb["pages"][p1]["strokes"].append(N.clean_stroke(stroke("x1")))
+code, _, body = http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json", "X-OpenPad-Digest": N.digest(nb)},
+                     json.dumps(nb).encode())
+res = json.loads(body)
+check("a new notebook syncs", code == 200 and res["d"] == N.digest(nb) and res["nb"] is None, res)
+other = copy.deepcopy(nb)
+other["pages"][p1]["strokes"].append(N.clean_stroke(stroke("x2")))
+other["pages"][p1]["strokes"] = [s for s in other["pages"][p1]["strokes"] if s["id"] != "x1"]
+other["pages"][p1]["gone"] = ["x1"]
+code, _, body = http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json", "X-OpenPad-Digest": "stale"},
+                     json.dumps(other).encode())
+res = json.loads(body)
+merged = res["nb"]
+check("a second device's copy merges", [s["id"] for s in merged["pages"][p1]["strokes"]] == ["x2"]
+      and merged["pages"][p1]["gone"] == ["x1"])
+listing = json.loads(http("GET", f"/api/sync?k={KEY}")[2])
+check("the notebook list carries digests", any(n["id"] == nb["id"] and n["d"] == res["d"] for n in listing["notebooks"]))
+check("a notebook can be fetched", json.loads(http("GET", f"/api/sync/nb/{nb['id']}?k={KEY}")[2])["title"] == "Calculus")
+check("unknown notebooks 404", http("GET", f"/api/sync/nb/nope?k={KEY}")[0] == 404)
+check("garbage isn't stored", http("POST", f"/api/sync/nb?k={KEY}", body=b"[1,2]")[0] == 400)
+check("huge notebooks refused", http("POST", f"/api/sync/nb?k={KEY}", {"Content-Length": str(10 ** 9)})[0] == 413)
+
+pdf = tiny_pdf(2)
+sha = hashlib.sha256(pdf).hexdigest()
+nb["pages"][p1]["bg"], nb["pages"][p1]["t"] = {"pdf": sha, "n": 1}, N.now_ms() + 100
+res = json.loads(http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(nb).encode())[2])
+check("the server asks for files it lacks", res["missing"] == [sha], res["missing"])
+check("files must match their hash", http("PUT", f"/api/asset/{'0' * 64}?k={KEY}", body=pdf)[0] == 400)
+check("file upload needs the key", http("PUT", f"/api/asset/{sha}", body=pdf)[0] == 403)
+check("file upload works", http("PUT", f"/api/asset/{sha}?k={KEY}", body=pdf)[0] == 200)
+code, h, body = http("GET", f"/api/asset/{sha}?k={KEY}")
+check("files are served with their type", code == 200 and body == pdf and h.get("content-type") == "application/pdf")
+code, h, body = http("GET", f"/api/asset/{sha}?k={KEY}", {"Range": "bytes=0-7"})
+check("range requests work (pdf.js reads big PDFs in parts)",
+      code == 206 and body == pdf[:8] and h.get("content-range") == f"bytes 0-7/{len(pdf)}")
+check("files need the key", http("GET", f"/api/asset/{sha}")[0] == 403)
+check("asset names are hashes only", http("GET", f"/api/asset/..%2f..%2ftoken?k={KEY}")[0] == 404)
+
+secid = nb["layout"]["sections"][0]["id"]
+code, _, body = http("PUT", f"/api/sync/pdf/{nb['id']}/{secid}?k={KEY}", body=pdf)
+out = json.loads(body).get("file", "")
+check("section PDFs land in the notes folder", code == 200 and out == os.path.join(TMP, "notes", "Calculus", "Lecture 1.pdf")
+      and open(out, "rb").read() == pdf, body)
+check("section PDFs are owner-only", mode(out) == 0o600 and mode(os.path.dirname(out)) == 0o700)
+check("only PDFs are written", http("PUT", f"/api/sync/pdf/{nb['id']}/{secid}?k={KEY}", body=b"<html>")[0] == 400)
+check("unknown sections are refused", http("PUT", f"/api/sync/pdf/{nb['id']}/nosuch?k={KEY}", body=pdf)[0] == 400)
+nb["layout"] = {"t": N.now_ms() + 200, "sections": [{**nb["layout"]["sections"][0], "title": "Limits/../../x"}]}
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(nb).encode())
+code, _, body = http("PUT", f"/api/sync/pdf/{nb['id']}/{secid}?k={KEY}", body=pdf)
+renamed = json.loads(body).get("file", "")
+check("a renamed section replaces its old PDF, and names can't escape the folder",
+      os.path.basename(renamed) == "Limits....x.pdf" and not os.path.exists(out) and os.path.dirname(renamed) == os.path.dirname(out),
+      renamed)
+code, _, _ = http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
+                  json.dumps({"id": nb["id"], "t": N.now_ms()}).encode())
+res = json.loads(http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(nb).encode())[2])
+check("a deleted notebook stays deleted (another device can't bring it back)", code == 200 and "deleted" in res)
+check("its folder moves to the trash", not os.path.exists(os.path.dirname(out)))
+
+# --------------------------------------------------------------------------- guests
+
+print("== guests")
+W, V = srv.guests.tokens["w"], srv.guests.tokens["v"]
+check("guest links need a valid token", ws("/ws?g=AAAAAAAAAAAAAAAAAAAAAA")[1] == 403)
+gw, code = ws(f"/ws?g={W}&me=alice1")
+st = recv_until(gw, "state")
+check("a draw link joins as a guest who can draw", code == 101 and st["role"] == "guest" and st["write"] and st["by"] == "galice1")
+gv, _ = ws(f"/ws?g={V}&me=bob1")
+stv = recv_until(gv, "state")
+check("a view link can't draw", stv["write"] is False)
+send(gv, {"t": "begin", "page": pid, "s": stroke("v1")})
+time.sleep(0.3)
+check("view-only guests' ink is ignored", "v1" not in srv.hub.strokes)
+send(gw, {"t": "begin", "page": pid, "s": stroke("g1", by="gsomeoneelse")})
+m = recv_until(pad, "begin")
+check("guest ink is tagged with the guest's id", m["s"]["id"] == "g1" and m["s"].get("by") == "galice1", m)
+send(gw, {"t": "pts", "id": sid, "pts": [[5, 5, 0.5]]})
+send(gw, {"t": "remove", "page": pid, "ids": [sid]})
+time.sleep(0.3)
+check("guests can't erase or extend the owner's ink", sid in srv.hub.strokes and len(srv.hub.strokes[sid][0]["pts"]) == 2)
+send(gw, {"t": "remove", "page": pid, "ids": ["g1"]})
+time.sleep(0.3)
+check("guests can erase their own ink", "g1" not in srv.hub.strokes)
+for msg in ({"t": "goto", "page": newp["id"]}, {"t": "live", "action": "start"},
+            {"t": "merge", "nb": {"id": live_nb["id"], "title": "pwned", "metaT": N.now_ms() + 10 ** 6}},
+            {"t": "open", "id": nb["id"]}, {"t": "clearguests"}):
+    send(gw, msg)
+time.sleep(0.4)
+check("guests can't turn pages, rename, open notebooks or start window capture",
+      srv.hub.page == pid and srv.hub.nb["title"] != "pwned" and srv.hub.live["state"] == "idle")
+check("guests can't use owner endpoints", all(http("GET", f"{p}?g={W}")[0] == 403 for p in ("/api/info", "/api/sync", "/api/pairing", "/api/ca.crt")))
+check("guests only get files of the live notebook", http("GET", f"/api/asset/{sha}?g={W}")[0] == 404)
+check("guests get the theme", http("GET", f"/theme.css?g={W}")[0] == 200)
+code, _, body = http("POST", f"/api/guests?k={KEY}", {"Content-Type": "application/json"}, b'{"action":"rotate"}')
+check("new links disconnect current guests", code == 200 and closed(gw) and closed(gv))
+check("old links stop working", ws(f"/ws?g={W}")[1] == 403 and srv.guests.check(W) is None)
+W = srv.guests.tokens["w"]
+
+print("== internet links (tunnel)")
+srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
+srv.tunnel.state = "on"
+TH = "quiet-river-test.trycloudflare.com"
+check("the guest page works through the tunnel", http("GET", "/join", host=TH)[0] == 200)
+s, code = ws(f"/ws?g={W}&me=carol1", origin=f"https://{TH}", host=TH)
+check("guests connect through the tunnel", code == 101 and recv_until(s, "state")["role"] == "guest")
+s.close()
+check("the owner key never works through the tunnel",
+      http("GET", f"/api/info?k={KEY}", host=TH)[0] == 404 and ws(f"/ws?role=pad&k={KEY}", host=TH)[1] == 403)
+check("owner pages and APIs are hidden from the internet",
+      all(http("GET", p, host=TH)[0] == 404 for p in ("/", "/view", "/setup", f"/api/sync?k={KEY}"))
+      and http("POST", "/api/pair", host=TH, body=b'{"pin":"000000"}')[0] == 404)
+check("the tunnel gives no key proof", "proof" not in json.loads(http("GET", "/api/ping?n=" + "ab" * 16, host=TH)[2]))
+info = json.loads(http("GET", f"/api/info?k={KEY}")[2])
+check("internet guest links use the tunnel", info["guests"]["iw"] == f"https://{TH}/join#w={W}")
+srv.tunnel.url, srv.tunnel.state = None, "off"
+check("the tunnel host is forgotten when it stops", http("GET", "/join", host=TH)[0] == 421)
+
+print("== pairing the installed app")
+pin, _ = srv.pairing.current()
+check("wrong PIN refused", http("POST", "/api/pair", {"Content-Type": "application/json"}, b'{"pin":"000000"}')[0] == 403
+      if pin != "000000" else True)
+time.sleep(1.05)
+code, _, body = http("POST", "/api/pair", {"Content-Type": "application/json", "Origin": APP_ORIGIN},
+                     json.dumps({"pin": pin}).encode())
+check("the right PIN gives the key", code == 200 and json.loads(body)["k"] == KEY)
+check("a PIN works once", srv.pairing.current()[0] != pin)
+time.sleep(1.05)
+check("guesses are rate-limited", [http("POST", "/api/pair", body=b'{"pin":"1"}')[0] for _ in range(2)] == [403, 403]
+      and srv.pairing.tries <= 1)
+check("pairing from other origins refused", http("POST", "/api/pair", {"Origin": "https://evil.example"}, b'{"pin":"1"}')[0] == 403)
+
+print("== HTTPS on the same port")
+ca_pem = os.path.join(DATA, "tls", "ca.pem")
+ctx = ssl.create_default_context(cafile=ca_pem)
+with socket.create_connection(("127.0.0.1", PORT), timeout=5) as raw:
+    with ctx.wrap_socket(raw, server_hostname="127.0.0.1") as t:
+        t.sendall(f"GET /api/sync?k={KEY} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nConnection: close\r\n\r\n".encode())
+        resp = b""
+        while chunk := t.recv(65536):
+            resp += chunk
+check("the server speaks HTTPS with a certificate from its own CA", resp.startswith(b"HTTP/1.1 200") and b"notebooks" in resp)
+from openpad import tls  # noqa: E402
+
+ca = srv.ca
+d_, q_ = tls.new_key()
+bad = tls.certificate("OpenPad server", q_, ca.issuer_cn, ca.ca_d, ca.ca_q, 30, names=["8.8.8.8", "example.com"])
+bad_dir = os.path.join(TMP, "badcert")
+os.makedirs(bad_dir)
+open(os.path.join(bad_dir, "c.pem"), "w").write(tls.pem("CERTIFICATE", bad))
+open(os.path.join(bad_dir, "k.pem"), "w").write(tls.private_key_pem(d_, q_))
+sctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+sctx.load_cert_chain(os.path.join(bad_dir, "c.pem"), os.path.join(bad_dir, "k.pem"))
+ls = socket.socket()
+ls.bind(("127.0.0.1", 0))
+ls.listen()
+
+
+def accept_once():
+    c, _ = ls.accept()
+    try:
+        sctx.wrap_socket(c, server_side=True).recv(1)
+    except (ssl.SSLError, OSError):
+        pass
+
+
+threading.Thread(target=accept_once, daemon=True).start()
+try:
+    with socket.create_connection(ls.getsockname(), timeout=5) as raw:
+        ctx.wrap_socket(raw, server_hostname="example.com")
+    constrained = False
+except ssl.SSLCertVerificationError:
+    constrained = True
+check("the CA can't vouch for public websites (name constraints)", constrained)
+check("the CA key is owner-only", mode(os.path.join(DATA, "tls", "ca-key.pem")) == 0o600)
+code, h, body = http("GET", f"/api/ca.crt?k={KEY}")
+check("the certificate downloads for the iPad", code == 200 and h.get("content-type") == "application/x-x509-ca-cert" and body[:1] == b"\x30")
+
 print("== control endpoints")
 check("launch code needs key header", http("POST", "/api/launch")[0] == 403)
 check("launch code ignores ?k=", http("POST", f"/api/launch?k={KEY}")[0] == 403)
 check("shutdown needs key header", http("POST", "/api/shutdown")[0] == 403)
 check("shutdown ignores ?k=", http("POST", f"/api/shutdown?k={KEY}")[0] == 403)
-code, _, body = http("POST", "/api/launch", {"X-Inkcast-Key": KEY})
+code, _, body = http("POST", "/api/launch", {"X-OpenPad-Key": KEY})
 lc = json.loads(body)["c"]
 code, _, body = http("POST", "/api/redeem", {"Content-Type": "application/json"}, json.dumps({"c": lc}).encode())
 check("launch code redeems to the key", code == 200 and json.loads(body)["k"] == KEY)
@@ -335,19 +647,21 @@ check("redeem from foreign Origin rejected",
       http("POST", "/api/redeem", {"Origin": "https://evil.example"}, b'{"c":"x"}')[0] == 403)
 check("live control needs key", http("POST", "/api/live", body=b'{"action":"start"}')[0] == 403)
 
-print("== PDFs")
-check("upload needs key", http("POST", "/api/pdf", body=b"%PDF-1.4")[0] == 403)
-check("non-PDF rejected", http("POST", f"/api/pdf?k={KEY}", body=b"#!/bin/sh\nrm -rf ~\n")[0] == 400)
-code, _, body = http("POST", f"/api/pdf?k={KEY}&name=../../x%0a.pdf", body=tiny_pdf(2))
-check("real PDF accepted", code == 200, body)
-st = recv_until(view, "state")
-name = st["doc"]["pdf"]["name"]
-check("PDF name sanitized", "/" not in name and "\n" not in name, name)
-rev = st["doc"]["pdf"]["rev"]
-check("page render needs key", http("GET", f"/api/pdf/{rev}/1.png")[0] == 403)
-check("page renders", http("GET", f"/api/pdf/{rev}/1.png?k={KEY}")[0] == 200)
-check("page out of range 404", http("GET", f"/api/pdf/{rev}/3.png?k={KEY}")[0] == 404)
-check("other PDF 404", http("GET", f"/api/pdf/aaaaaaaaaaaa/1.png?k={KEY}")[0] == 404)
+print("== PDFs added from the share window")
+pdf3 = tiny_pdf(3)
+sha3 = hashlib.sha256(pdf3).hexdigest()
+http("PUT", f"/api/asset/{sha3}?k={KEY}", body=pdf3)
+before = len(srv.hub.nb["layout"]["sections"])
+send(view, {"t": "addpdf", "sha": sha3, "name": "Week 2.pdf", "sizes": [[612, 792]] * 3})
+st = recv_until(pad, "state")
+secs = st["nb"]["layout"]["sections"]
+check("a PDF becomes a new section of the live notebook",
+      len(secs) == before + 1 and any(s["title"] == "Week 2" and len(s["pages"]) == 3 for s in secs))
+check("its pages show the PDF", st["nb"]["pages"][st["page"]]["bg"] == {"pdf": sha3, "n": 1})
+gw, _ = ws(f"/ws?g={W}&me=dave1")
+recv_until(gw, "state")
+check("guests can now load that PDF", http("GET", f"/api/asset/{sha3}?g={W}")[0] == 200)
+gw.close()
 
 # --------------------------------------------------------------------------- desktop annotation
 
@@ -371,10 +685,10 @@ else:
             seen["picking"] |= m.get("state") == "picking"
             seen["live"] |= m.get("state") == "live"
         elif m.get("t") == "state":
-            lp = [p for p in m["doc"]["pages"] if p["bg"] and p["bg"].get("live")]
+            lp = [p for p in m["nb"]["pages"].values() if p["bg"] and p["bg"].get("live")]
             if lp:
                 seen["page"] = lp[0]["id"]
-                seen["current"] = m["doc"]["pages"][m["doc"]["page"]]["id"] == lp[0]["id"]
+                seen["current"] = m["page"] == lp[0]["id"]
     check("picker requested", seen["picking"])
     check("window goes live", seen["live"])
     check("live window becomes the current page", seen["page"] and seen["current"])
@@ -384,11 +698,11 @@ else:
     check("bar status reports live", status.get("live") == "live", status.get("live"))
     code, _, body = http("GET", f"/api/live/frame.jpg?k={KEY}")
     check("current frame available for PDF export", code == 200 and body[:2] == b"\xff\xd8")
-    check("current frame needs key", http("GET", "/api/live/frame.jpg")[0] == 403)
+    check("current frame needs a key", http("GET", "/api/live/frame.jpg")[0] == 403)
     time.sleep(0.8)
     late, _ = ws(f"/ws?role=view&k={KEY}")
     kind, m = recv_any(late)
-    lp = [p for p in m["doc"]["pages"] if p["bg"] and p["bg"].get("live")][0]
+    lp = [p for p in m["nb"]["pages"].values() if p["bg"] and p["bg"].get("live")][0]
     check("window resize updates the page shape", lp["h"] == 500.0, lp["h"])
     kind, _ = recv_any(late)
     while kind == "text":
@@ -404,32 +718,20 @@ else:
         if kind == "text" and m.get("t") == "state" and end:
             break
     check("stop reports why", end and end.get("reason") == "stopped", end)
-    pg = [p for p in m["doc"]["pages"] if p["id"] == live_id][0]
-    check("stopped window keeps its last frame", pg["bg"] == {"img": live_id}, pg["bg"])
-    code, _, body = http("GET", f"/api/img/{live_id}.jpg?k={KEY}")
+    bg = m["nb"]["pages"][live_id]["bg"]
+    check("stopped window keeps its last frame as a synced image", bg and N.SHA_RE.match(bg.get("img", "")), bg)
+    code, _, body = http("GET", f"/api/asset/{bg['img']}?k={KEY}")
     check("frozen frame served", code == 200 and body[:2] == b"\xff\xd8")
-    check("frozen frame needs key", http("GET", f"/api/img/{live_id}.jpg")[0] == 403)
-    check("unknown frame id 404", http("GET", f"/api/img/nope.jpg?k={KEY}")[0] == 404)
-    check("frozen frame stored owner-only", mode(os.path.join(DATA, f"img-{live_id}.jpg")) == 0o600)
+    check("frozen frame stored owner-only", mode(os.path.join(DATA, "assets", bg["img"])) == 0o600)
 
     send(pad, {"t": "live", "action": "start"})
     time.sleep(0.8)
-    send(pad, {"t": "delpage", "page": srv.hub.live["page"]})
+    lp_id = srv.hub.live["page"]
+    lay = srv.hub.nb["layout"]
+    send(pad, {"t": "merge", "nb": {"id": srv.hub.nb["id"], "goneP": [lp_id],
+               "layout": {"t": N.now_ms() + 10, "sections": [{**s, "pages": [x for x in s["pages"] if x != lp_id]} for s in lay["sections"]]}}})
     wait_live_state()
-    check("deleting the live page stops capture", srv.hub.capture is None and srv.hub.live["state"] == "idle",
-          srv.hub.live)
-    send(pad, {"t": "newdoc"})
-    time.sleep(0.5)
-    check("a new notebook deletes old frames", not any(f.startswith("img-") for f in os.listdir(DATA)))
-
-    doc = {"id": "d1", "page": 0, "pdf": None, "pages": [{"id": "pg1", "w": 1000, "h": 500, "paper": "blank",
-           "bg": {"live": True}, "pt": [600, 300], "strokes": []}]}
-    write_private(srv.store / "img-pg1.jpg", b"\xff\xd8\xff\xd9")
-    write_private(srv.store / "session.json", json.dumps(doc))
-    check("after a restart a live page shows its last frame",
-          Hub(srv.store).doc["pages"][0]["bg"] == {"img": "pg1"})
-
-# --------------------------------------------------------------------------- browser capture
+    check("deleting the live page stops capture", srv.hub.capture is None and srv.hub.live["state"] == "idle", srv.hub.live)
 
 print("== desktop annotation through the browser (Windows/macOS)")
 srv.hub._native = False  # as on Windows/macOS: the share window captures
@@ -479,7 +781,7 @@ m = recv_until(other, "live")
 check("a second source is refused", m.get("state") == "error", m)
 send(share, {"t": "live", "action": "resize", "w": 1000, "h": 500})
 time.sleep(0.4)
-live_page = srv.hub.pages.get(srv.hub.live["page"])
+live_page = srv.hub.nb["pages"].get(srv.hub.live["page"])
 check("the source can report a new window size", live_page and live_page["h"] == 500.0, live_page and live_page["h"])
 pid_live = srv.hub.live["page"]
 share.close()
@@ -487,16 +789,35 @@ got = drain(bpad, lambda k, m: k == "text" and m.get("t") == "live" and m.get("s
 end = [m for k, m in got if k == "text" and m.get("t") == "live" and m.get("state") == "idle"]
 check("closing the share window ends capture", end and end[0].get("reason") == "closed", end)
 time.sleep(0.3)
-check("and the page keeps the last frame", srv.hub.pages[pid_live]["bg"] == {"img": pid_live})
+check("and the page keeps the last frame", (srv.hub.nb["pages"][pid_live]["bg"] or {}).get("img") == hashlib.sha256(jpeg).hexdigest())
 srv.hub._native = None
+
+print("== upgrading from Inkcast")
+old = os.path.join(TMP, "legacy")
+os.makedirs(old, mode=0o700)
+from pathlib import Path  # noqa: E402
+
+write_private(Path(old) / "pdf-aaaaaaaaaaaa.pdf", tiny_pdf(1))
+write_private(Path(old) / "img-pg2.jpg", b"\xff\xd8\xff\xd9")
+write_private(Path(old) / "session.json", json.dumps({"id": "d1", "page": 0, "pdf": {"name": "Old.pdf", "rev": "aaaaaaaaaaaa"},
+              "pages": [{"id": "pg1", "w": 1000, "h": 1294, "paper": "blank", "bg": {"pdf": "aaaaaaaaaaaa", "n": 1}, "pt": [612, 792],
+                         "strokes": [stroke("old1")]},
+                        {"id": "pg2", "w": 1000, "h": 500, "paper": "blank", "bg": {"img": "pg2"}, "pt": [600, 300], "strokes": []}]}))
+st2 = Store(Path(old), Path(TMP) / "notes2")
+h2 = Hub(st2, Path(old))
+check("the old board becomes a notebook with its ink",
+      h2.nb["title"] == "Old.pdf" and N.order(h2.nb) == ["pg1", "pg2"] and h2.nb["pages"]["pg1"]["strokes"][0]["id"] == "old1")
+check("its PDF and frames become synced files",
+      h2.nb["pages"]["pg1"]["bg"]["pdf"] == hashlib.sha256(tiny_pdf(1)).hexdigest() and st2.has_asset(h2.nb["pages"]["pg2"]["bg"]["img"]))
+check("old files are cleaned up", not any(f.startswith(("pdf-", "img-", "session.json")) and not f.endswith(".migrated") for f in os.listdir(old)))
 
 # --------------------------------------------------------------------------- impostor servers
 
 print("== the CLI only gives the key to the real server")
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
-import inkcast.cli as cli  # noqa: E402
-from inkcast.server import ping_proof  # noqa: E402
+import openpad.cli as cli  # noqa: E402
+from openpad.server import ping_proof  # noqa: E402
 
 nonce = "ab" * 16
 code, _, body = http("GET", f"/api/ping?n={nonce}")
@@ -514,7 +835,7 @@ def squatter(proof):
 
         def do_GET(self):
             seen_headers.append(dict(self.headers))
-            out = {"app": "inkcast", "version": "9"}
+            out = {"app": "openpad", "version": "9"}
             if proof:
                 out["proof"] = proof
             body = json.dumps(out).encode()
@@ -554,7 +875,7 @@ print("== secrets stay off command lines")
 # key, launch codes and the AirPlay PIN must never be passed as arguments.
 import subprocess  # noqa: E402
 
-import inkcast.cli as cli  # noqa: E402
+import openpad.cli as cli  # noqa: E402
 
 argvs = []
 real_run, real_popen = subprocess.run, subprocess.Popen
@@ -614,9 +935,13 @@ else:
 
 print("== file permissions")
 time.sleep(2.5)
+nbfile = os.path.join(DATA, "notebooks", srv.hub.nb["id"] + ".json")
 check("data dir 0700", mode(DATA) == 0o700, oct(mode(DATA)))
 check("token 0600", mode(os.path.join(DATA, "token")) == 0o600)
-check("session 0600", mode(os.path.join(DATA, "session.json")) == 0o600)
+check("guest links 0600", mode(os.path.join(DATA, "guests.json")) == 0o600)
+check("notebooks 0700/0600", mode(os.path.join(DATA, "notebooks")) == 0o700 and mode(nbfile) == 0o600)
+check("files 0700", mode(os.path.join(DATA, "assets")) == 0o700)
+check("certificates 0700", mode(os.path.join(DATA, "tls")) == 0o700)
 check("runtime dir 0700", mode(RUN) == 0o700)
 check("status 0600", mode(os.path.join(RUN, "status.json")) == 0o600)
 

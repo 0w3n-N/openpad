@@ -1,22 +1,22 @@
-# Inkcast setup for Windows 10/11. Every step explains itself and asks first;
+# OpenPad setup for Windows 10/11. Every step explains itself and asks first;
 # nothing changes unless you answer yes. Safe to run again.
 #
-# Run from the Inkcast folder:
+# Run from the OpenPad folder:
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 #
 #   1. Python 3.9+ (winget: Python.Python.3.12)
-#   2. Poppler for writing on PDFs (winget: oschwartz10612.Poppler)
+#   2. Optional: cloudflared, for internet links you can send to guests
 #   3. Firewall: allow TCP 8770 on private networks (asks Windows for admin rights)
-#   4. Optional: Start menu shortcut and an `inkcast` command
+#   4. Optional: Start menu shortcut and an `openpad` command
 #
 # Undo with scripts\uninstall.ps1.
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Port = 8770
-if ($env:INKCAST_PORT -match '^\d+$') { $Port = [int]$env:INKCAST_PORT }
-$RuleGroup = 'Inkcast'
-$DataDir = Join-Path $env:LOCALAPPDATA 'Inkcast'
+if ($env:OPENPAD_PORT -match '^\d+$') { $Port = [int]$env:OPENPAD_PORT }
+$RuleGroup = 'OpenPad'
+$DataDir = Join-Path $env:LOCALAPPDATA 'OpenPad'
 
 function Ask([string]$Question, [string]$Default = 'y') {
     $hint = if ($Default -eq 'y') { '[Y/n]' } else { '[y/N]' }
@@ -37,7 +37,7 @@ function Invoke-Elevated([string]$Script) {
     return $p.ExitCode -eq 0
 }
 
-# The Python that will run Inkcast, as "py -3" or "python", if it is 3.9 or newer.
+# The Python that will run OpenPad, as "py -3" or "python", if it is 3.9 or newer.
 function Find-Python {
     foreach ($candidate in @(@('py', '-3'), @('python'))) {
         if (-not (Have $candidate[0])) { continue }
@@ -52,7 +52,7 @@ function Find-Python {
     return $null
 }
 
-Write-Host 'Inkcast setup. Each step asks before changing anything.'
+Write-Host 'OpenPad setup. Each step asks before changing anything.'
 
 # ----------------------------------------------------------------- 1. Python
 Step '1. Python'
@@ -72,28 +72,30 @@ if ($python) {
     exit 1
 }
 
-# ----------------------------------------------------------------- 2. Poppler
-Step '2. PDF support (Poppler)'
-if ((Have 'pdftoppm') -and (Have 'pdfinfo')) {
-    Write-Host 'Poppler is installed.'
-} elseif (Have 'winget') {
-    if (Ask 'Install Poppler with winget so you can write on PDFs?') {
-        winget install -e --id oschwartz10612.Poppler
-        Write-Host 'Poppler is installed. Open a new terminal before starting Inkcast so it can find it.'
-    }
+# ----------------------------------------------------------------- 2. Internet links
+Step '2. Internet links for guests (optional)'
+$cfd = (Have 'cloudflared') -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'cloudflared\cloudflared.exe'))
+if ($cfd) {
+    Write-Host 'cloudflared is installed.'
 } else {
-    Write-Host 'To write on PDFs, install Poppler and add its bin folder to PATH: https://github.com/oschwartz10612/poppler-windows/releases'
+    Write-Host 'Guests on your Wi-Fi can always join. To send links to people elsewhere (e.g. on a call),'
+    Write-Host 'OpenPad can use a free Cloudflare quick tunnel, only while you switch it on.'
+    if ((Have 'winget') -and (Ask 'Install cloudflared with winget?' 'n')) {
+        winget install -e --id Cloudflare.cloudflared
+    }
 }
 
 # ----------------------------------------------------------------- 3. Firewall
 Step '3. Firewall'
-Write-Host "Windows blocks incoming connections, including from your iPad. Inkcast needs TCP $Port."
+Write-Host "Windows blocks incoming connections, including from your iPad. OpenPad needs TCP $Port."
 Write-Host 'The rule only applies to networks marked Private (home or work), not public Wi-Fi.'
 $existing = Get-NetFirewallRule -Group $RuleGroup -ErrorAction SilentlyContinue
 if ($existing) {
-    Write-Host 'The Inkcast firewall rule is already there.'
+    Write-Host 'The OpenPad firewall rule is already there.'
 } elseif (Ask "Allow TCP $Port on private networks? (Windows will ask for admin rights)") {
-    $ok = Invoke-Elevated ("New-NetFirewallRule -DisplayName 'Inkcast whiteboard (TCP $Port)' -Group '$RuleGroup' " +
+    # Also removes the rule from when OpenPad was called Inkcast.
+    $ok = Invoke-Elevated ("Get-NetFirewallRule -Group 'Inkcast' -ErrorAction SilentlyContinue | Remove-NetFirewallRule; " +
+        "New-NetFirewallRule -DisplayName 'OpenPad (TCP $Port)' -Group '$RuleGroup' " +
         "-Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private | Out-Null")
     if ($ok) {
         New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
@@ -117,29 +119,31 @@ foreach ($net in $public) {
 Step '4. Extras (optional)'
 $pythonw = Join-Path (Split-Path -Parent $python) 'pythonw.exe'
 if (-not (Test-Path $pythonw)) { $pythonw = $python }
-if (Ask 'Add Inkcast to the Start menu?' 'y') {
-    $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Inkcast.lnk'
+$oldLnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Inkcast.lnk'
+if (Test-Path $oldLnk) { Remove-Item $oldLnk }  # OpenPad used to be called Inkcast
+if (Ask 'Add OpenPad to the Start menu?' 'y') {
+    $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'OpenPad.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($lnk)
     $shortcut.TargetPath = $pythonw
-    $shortcut.Arguments = '-B "' + (Join-Path $Root 'bin\inkcast') + '" board'
+    $shortcut.Arguments = '-B "' + (Join-Path $Root 'bin\openpad') + '" board'
     $shortcut.WorkingDirectory = $Root
     $shortcut.IconLocation = (Join-Path $Root 'assets\icon.ico')
-    $shortcut.Description = 'Apple Pencil whiteboard for your iPad'
+    $shortcut.Description = 'Notes for iPad and Apple Pencil'
     $shortcut.Save()
     Write-Host "Added $lnk"
 }
 $bin = Join-Path $Root 'bin'
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($userPath -split ';') -notcontains $bin) {
-    if (Ask "Add the 'inkcast' command to your PATH? (adds $bin)" 'n') {
+    if (Ask "Add the 'openpad' command to your PATH? (adds $bin)" 'n') {
         $newPath = if ($userPath) { "$userPath;$bin" } else { $bin }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Host 'Added. Open a new terminal to use: inkcast'
+        Write-Host 'Added. Open a new terminal to use: openpad'
     }
 }
 
 Step 'Done'
-& $python -B (Join-Path $Root 'bin\inkcast') doctor
+& $python -B (Join-Path $Root 'bin\openpad') doctor
 Write-Host ''
-Write-Host 'Start Inkcast from the Start menu, or run:  python bin\inkcast'
+Write-Host 'Start OpenPad from the Start menu, or run:  python bin\openpad'

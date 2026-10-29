@@ -7,7 +7,7 @@ stream; GStreamer scales it and encodes JPEG frames, which the server relays to
 the iPad and the share window.
 
 Needs python-gobject, gstreamer, gst-plugin-pipewire and gst-plugins-good. Imported
-lazily: without them Inkcast works as before and annotation reports what's missing.
+lazily: without them OpenPad works as before and annotation reports what's missing.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class WindowCapture:
         self._stop_requested = False
         self._size = None
         self._frames = 0
-        self.thread = threading.Thread(target=self._run, daemon=True, name="inkcast-capture")
+        self.thread = threading.Thread(target=self._run, daemon=True, name="openpad-capture")
 
     def start(self):
         self.thread.start()
@@ -136,7 +136,7 @@ class WindowCapture:
     def _request(self, method, args_builder, on_response):
         """Call a portal method that answers through a Request object's Response signal."""
         GLib, Gio = self.GLib, self.Gio
-        token = "inkcast" + secrets.token_hex(6)
+        token = "openpad" + secrets.token_hex(6)
         path = f"/org/freedesktop/portal/desktop/request/{self._sender}/{token}"
 
         def handler(conn, sender, obj, iface, signal, params):
@@ -165,7 +165,7 @@ class WindowCapture:
         def args(token):
             return GLib.Variant("(a{sv})", ({
                 "handle_token": GLib.Variant("s", token),
-                "session_handle_token": GLib.Variant("s", "inkcast" + secrets.token_hex(6)),
+                "session_handle_token": GLib.Variant("s", "openpad" + secrets.token_hex(6)),
             },))
 
         self._request("CreateSession", args, self._on_session)

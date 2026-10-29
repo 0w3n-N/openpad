@@ -1,0 +1,14 @@
+{
+  "name": "OpenPad",
+  "short_name": "OpenPad",
+  "description": "Notes for iPad and Apple Pencil: notebooks, sections, PDFs. Syncs to your computer.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1b1d23",
+  "theme_color": "#16181d",
+  "icons": [
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

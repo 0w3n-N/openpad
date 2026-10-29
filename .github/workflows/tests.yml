@@ -17,9 +17,9 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y poppler-utils python3-gi gir1.2-gstreamer-1.0 \
+          sudo apt-get install -y python3-gi gir1.2-gstreamer-1.0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-      - name: Security, protocol and annotation tests
+      - name: Security, sync, guests and annotation tests
         run: /usr/bin/python3 -B tests/run.py
       - name: Smoke test
         run: /usr/bin/python3 -B tests/smoke.py

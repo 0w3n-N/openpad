@@ -1,6 +1,6 @@
 """A small QR Code encoder (byte mode, error correction level M). No dependencies.
 
-Inkcast only needs to encode its pairing link, so this covers what that needs:
+OpenPad only needs to encode its pairing link, so this covers what that needs:
 UTF-8 byte mode, versions 1-40, ECC level M, and the standard mask selection.
 It follows ISO/IEC 18004 in the same way as Project Nayuki's reference
 implementation (https://www.nayuki.io/page/qr-code-generator-library).

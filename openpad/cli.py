@@ -1,4 +1,4 @@
-"""inkcast command line."""
+"""openpad command line."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ IS_WINDOWS = os.name == "nt"
 
 def default_port():
     try:
-        port = int(os.environ.get("INKCAST_PORT", "8770"))
+        port = int(os.environ.get("OPENPAD_PORT", "8770"))
         return port if 1024 <= port <= 65535 else 8770
     except ValueError:
         return 8770
@@ -57,9 +57,9 @@ def log_dir() -> Path:
     if IS_WINDOWS:
         return private_dir(data_dir() / "logs")
     if IS_MAC:
-        return private_dir(Path(os.path.expanduser("~/Library/Logs/inkcast")))
+        return private_dir(Path(os.path.expanduser("~/Library/Logs/openpad")))
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return private_dir(Path(base) / "inkcast")
+    return private_dir(Path(base) / "openpad")
 
 
 def local(port, path):
@@ -102,15 +102,15 @@ def ping(port):
 
 
 def not_ours(port):
-    return (f"inkcast: something else is using port {port}, not your Inkcast server, so it won't be "
-            f"sent your key. Stop that program, or use another port (--port or INKCAST_PORT). "
-            f"If it's an older Inkcast still running, stop it with: pkill -f 'inkcast serve'")
+    return (f"openpad: something else is using port {port}, not your OpenPad server, so it won't be "
+            f"sent your key. Stop that program, or use another port (--port or OPENPAD_PORT). "
+            f"If it's an older OpenPad still running, stop it with: pkill -f 'openpad serve'")
 
 
 def request(port, path, method="GET", timeout=3, body=None):
     if probe(port) != "ours":
         sys.exit(not_ours(port))
-    headers = {"X-Inkcast-Key": token()}
+    headers = {"X-OpenPad-Key": token()}
     if body is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(local(port, path), method=method, headers=headers,
@@ -184,7 +184,7 @@ def start_background(args):
         print(not_ours(args.port), file=sys.stderr)
         return False
     log = log_dir() / "server.log"
-    cmd = [sys.executable, "-B", "-m", "inkcast", "serve", "--port", str(args.port), "--quiet"]
+    cmd = [sys.executable, "-B", "-m", "openpad", "serve", "--port", str(args.port), "--quiet"]
     if args.host:
         cmd += ["--host", args.host]
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
@@ -197,7 +197,7 @@ def start_background(args):
         if ping(args.port):
             return True
         time.sleep(0.1)
-    print(f"inkcast: the server did not start, see {log}", file=sys.stderr)
+    print(f"openpad: the server did not start, see {log}", file=sys.stderr)
     return False
 
 
@@ -205,19 +205,19 @@ def start_background(args):
 
 
 def cmd_serve(args):
-    from .server import InkcastServer
+    from .server import OpenPadServer
 
     try:
-        srv = InkcastServer(args.bind, args.port, args.host)
+        srv = OpenPadServer(args.bind, args.port, args.host)
     except OSError as e:
-        sys.exit(f"inkcast: cannot listen on port {args.port}: {e}")
+        sys.exit(f"openpad: cannot listen on port {args.port}: {e}")
 
     def stop(*_):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
     if not args.quiet:
-        print(f"Inkcast {__version__} listening on port {args.port}  (Ctrl+C to stop)")
+        print(f"OpenPad {__version__} listening on port {args.port}  (Ctrl+C to stop)")
         for u in srv.pad_urls():
             print(f"iPad: {u}")
         sys.stdout.flush()
@@ -247,7 +247,7 @@ def cmd_open(args, extra=""):
     from .server import launcher_path, write_private
     target = local(args.port, f"/view#c={code}{extra}")
     page = launcher_path(code)
-    write_private(page, '<!doctype html><meta charset="utf-8"><title>Inkcast</title>'
+    write_private(page, '<!doctype html><meta charset="utf-8"><title>OpenPad</title>'
                         f'<meta http-equiv="refresh" content="0;url={target}">')
     open_window(page.as_uri())
 
@@ -265,13 +265,41 @@ def cmd_annotate(args):
         # captures the window through the browser, which needs a click there.
         cmd_open(args, "&annotate=1")
         if sys.stdout.isatty():
-            print('In the Inkcast window, click "Choose a window" and pick the window to show on the iPad.')
+            print('In the OpenPad window, click "Choose a window" and pick the window to show on the iPad.')
         return
     if not start_background(args):
         sys.exit(1)
     request(args.port, "/api/live", "POST", timeout=10, body={"action": "start"})
     if sys.stdout.isatty():
         print("Pick the window in the share dialog. It appears on the iPad as a new page.")
+
+
+def cmd_invite(args):
+    """Open the share window's Invite panel (guest links, internet link)."""
+    if args.internet or args.off:
+        if not start_background(args):
+            sys.exit(1)
+        info = request(args.port, "/api/guests", "POST", timeout=5,
+                       body={"action": "internet-off" if args.off else "internet-on"})
+        if args.off:
+            print("Internet link off. Guests on this Wi-Fi can still join.")
+            return
+        for _ in range(40):  # cloudflared takes a few seconds to get an address
+            net = info["guests"]["internet"]
+            if net["state"] != "starting":
+                break
+            time.sleep(0.5)
+            info = request(args.port, "/api/info")
+        if net["state"] != "on":
+            sys.exit(f"openpad: {net['error'] or 'the internet link did not start'}")
+        print(f"Internet link (can draw): {info['guests']['iw']}")
+        print(f"Internet link (view only): {info['guests']['iv']}")
+        return
+    cmd_open(args, "&guests=1")
+    if sys.stdout.isatty():
+        info = request(args.port, "/api/info")
+        print(f"Guest link (can draw): {info['guests']['w']}")
+        print(f"Guest link (view only): {info['guests']['v']}")
 
 
 def cmd_board(args):
@@ -282,22 +310,22 @@ def cmd_board(args):
 
 def cmd_stop(args):
     if not ping(args.port):
-        print("inkcast is not running")
+        print("openpad is not running")
         return
     try:
         request(args.port, "/api/shutdown", "POST")
     except urllib.error.HTTPError as e:
-        sys.exit(f"inkcast: could not stop the server ({e.code})")
+        sys.exit(f"openpad: could not stop the server ({e.code})")
     for _ in range(30):
         if not ping(args.port):
             break
         time.sleep(0.1)
-    print("inkcast stopped")
+    print("openpad stopped")
 
 
 def cmd_url(args):
     if not ping(args.port):
-        sys.exit("inkcast is not running (start it with: inkcast)")
+        sys.exit("openpad is not running (start it with: openpad)")
     print_pad_urls(args.port)
 
 
@@ -310,7 +338,8 @@ def cmd_status(args):
     if args.json:
         print(json.dumps(status))
     elif status["running"]:
-        print(f"running · {status.get('pads', 0)} iPad(s) · {status.get('views', 0)} viewer window(s)")
+        print(f"running · {status.get('notebook', '')} · {status.get('pads', 0)} iPad(s) · "
+              f"{status.get('views', 0)} share window(s) · {status.get('guests', 0)} guest(s)")
         print(status.get("url", ""))
     else:
         print("stopped")
@@ -359,6 +388,8 @@ def cmd_mirror(args):
 def cmd_doctor(args):
     """What's installed and configured; the bar plugin reads --json."""
     from .server import lan_addresses
+    from .store import notes_dir
+    from .tunnel import cloudflared
 
     def active(unit):
         if not shutil.which("systemctl"):
@@ -386,7 +417,7 @@ def cmd_doctor(args):
         "version": __version__,
         "python": sys.version.split()[0],
         "os": "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux",
-        "poppler": bool(shutil.which("pdftoppm") and shutil.which("pdfinfo")),
+        "cloudflared": bool(cloudflared()),
         "uxplay": bool(shutil.which("uxplay")),
         # Linux captures through the portal; elsewhere the share window does it in the browser.
         "capture": not capture_missing,
@@ -394,18 +425,19 @@ def cmd_doctor(args):
         "avahi": bool(active("avahi-daemon")) if linux else True,
         "firewall": firewall,
         "lan": lan[0] if lan else "",
+        "notes": str(notes_dir()),
     }
     if args.json:
         print(json.dumps(report))
         return
     ok = lambda b: "ok" if b else "missing"
     setup = r"scripts\setup.ps1" if IS_WINDOWS else "scripts/setup"
-    print(f"inkcast {report['version']} (python {report['python']}, {report['os']})")
-    print(f"  PDF support (poppler)   {ok(report['poppler'])}")
+    print(f"openpad {report['version']} (python {report['python']}, {report['os']})")
+    print(f"  Internet guest links    {'ok (cloudflared)' if report['cloudflared'] else 'missing cloudflared (optional)'}")
     if report["capture_mode"] == "native":
         print("  Window annotation       ok (system window picker)")
     else:
-        print("  Window annotation       via Chrome/Edge (click Window in the Inkcast window)")
+        print("  Window annotation       via Chrome/Edge (click Window in the OpenPad window)")
     if linux:
         print(f"  AirPlay (uxplay)        {ok(report['uxplay'])}")
         print(f"  Discovery (avahi)       {ok(report['avahi'])}")
@@ -419,7 +451,8 @@ def cmd_doctor(args):
              "macos": "allow incoming connections for Python if macOS asks"}
     print(f"  Firewall                {notes.get(firewall, firewall)}")
     print(f"  Network address         {report['lan'] or 'none (connect to Wi-Fi or Ethernet)'}")
-    if not report["poppler"] or firewall in ("needs-setup", "windows"):
+    print(f"  Synced notes (PDFs)     {report['notes']}")
+    if firewall in ("needs-setup", "windows"):
         print(f"\nRun {setup} to fix what's missing (it asks before each step).")
 
 
@@ -451,12 +484,12 @@ def name_arg(value):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="inkcast", description="Apple Pencil whiteboard and iPad mirroring for your desktop.")
-    p.add_argument("--version", action="version", version=f"inkcast {__version__}")
+    p = argparse.ArgumentParser(prog="openpad", description="Notes for iPad and Apple Pencil, synced and shown live on your computer.")
+    p.add_argument("--version", action="version", version=f"openpad {__version__}")
     sub = p.add_subparsers(dest="cmd")
 
     def common(sp):
-        sp.add_argument("--port", type=port_arg, default=default_port(), help="HTTP port (default 8770 or $INKCAST_PORT)")
+        sp.add_argument("--port", type=port_arg, default=default_port(), help="HTTP port (default 8770 or $OPENPAD_PORT)")
         sp.add_argument("--host", type=host_arg, help="LAN address to advertise to the iPad (auto-detected)")
 
     for name, fn, help_ in (
@@ -475,6 +508,12 @@ def main(argv=None):
     sp.add_argument("--stop", action="store_true", help="stop the live window (its last frame stays)")
     sp.set_defaults(fn=cmd_annotate)
 
+    sp = sub.add_parser("invite", help="links for people to watch and write along (opens the Invite panel)")
+    common(sp)
+    sp.add_argument("--internet", action="store_true", help="also make an internet link (Cloudflare quick tunnel)")
+    sp.add_argument("--off", action="store_true", help="turn the internet link off")
+    sp.set_defaults(fn=cmd_invite)
+
     sp = sub.add_parser("status", help="show whether the server is running")
     common(sp)
     sp.add_argument("--json", action="store_true")
@@ -491,7 +530,7 @@ def main(argv=None):
     sp.set_defaults(fn=cmd_serve)
 
     sp = sub.add_parser("mirror", help="AirPlay screen mirroring receiver (UxPlay)")
-    sp.add_argument("--name", type=name_arg, default=os.environ.get("INKCAST_AIRPLAY_NAME", "Omarchy"))
+    sp.add_argument("--name", type=name_arg, default=os.environ.get("OPENPAD_AIRPLAY_NAME", "Omarchy"))
     sp.add_argument("--pin", type=pin_arg, help="4-digit PIN (default: random)")
     sp.add_argument("--no-pin", action="store_true", help="let anyone on the network mirror without a PIN")
     sp.add_argument("--fullscreen", action="store_true")
@@ -506,4 +545,4 @@ def main(argv=None):
     try:
         args.fn(args)
     except urllib.error.URLError as e:
-        sys.exit(f"inkcast: could not reach the server: {e.reason}")
+        sys.exit(f"openpad: could not reach the server: {e.reason}")

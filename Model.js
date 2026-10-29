@@ -14,13 +14,13 @@ function toInt(value, lo, hi, fallback) {
   return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback
 }
 
-// status.json written by the server (see inkcast/server.py write_status).
+// status.json written by the server (see openpad/server.py write_status).
 function parseStatus(raw, nowSec) {
-  var empty = { running: false, pads: 0, views: 0, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0, live: "idle" }
+  var empty = { running: false, pads: 0, views: 0, guests: 0, notebook: "", internet: false, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0, live: "idle" }
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 200000) return empty
   var s
   try { s = JSON.parse(raw) } catch (e) { return empty }
-  if (!s || typeof s !== "object" || s.app !== "inkcast") return empty
+  if (!s || typeof s !== "object" || s.app !== "openpad") return empty
   var updated = Number(s.updated)
   var fresh = isFinite(updated) && Math.abs(nowSec - updated) < STALE_AFTER_SEC
   var qr = []
@@ -38,6 +38,9 @@ function parseStatus(raw, nowSec) {
     running: s.running === true && fresh,
     pads: toInt(s.pads, 0, 99, 0),
     views: toInt(s.views, 0, 99, 0),
+    guests: toInt(s.guests, 0, 99, 0),
+    notebook: singleLine(s.notebook, 80),
+    internet: typeof s.internet === "string" && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(s.internet),
     url: url,
     qr: qr,
     qrSize: qr.length,
@@ -48,15 +51,15 @@ function parseStatus(raw, nowSec) {
   }
 }
 
-// `inkcast doctor --json`.
+// `openpad doctor --json`.
 function parseDoctor(raw) {
-  var d = { known: false, uxplay: false, poppler: false, avahi: false, capture: false, firewall: "unknown", lan: "" }
+  var d = { known: false, uxplay: false, cloudflared: false, avahi: false, capture: false, firewall: "unknown", lan: "" }
   if (typeof raw !== "string" || raw.length > 10000) return d
   try {
     var j = JSON.parse(raw)
     d.known = true
     d.uxplay = j.uxplay === true
-    d.poppler = j.poppler === true
+    d.cloudflared = j.cloudflared === true
     d.avahi = j.avahi === true
     d.capture = j.capture === true
     d.firewall = ["open", "configured", "needs-setup"].indexOf(j.firewall) >= 0 ? j.firewall : "unknown"
@@ -66,18 +69,20 @@ function parseDoctor(raw) {
 }
 
 function needsSetup(d) {
-  return d.known && (!d.poppler || !d.capture || d.firewall === "needs-setup")
+  return d.known && (!d.capture || d.firewall === "needs-setup")
 }
 
 function statusLine(st, mirroring) {
   if (!st.running) return mirroring ? "Mirroring on" : "Off"
-  if (st.pads > 0) return st.pads === 1 ? "iPad connected" : st.pads + " iPads connected"
-  return "Waiting for iPad"
+  var guests = st.guests > 0 ? (st.guests === 1 ? " · 1 guest" : " · " + st.guests + " guests") : ""
+  if (st.pads > 0) return (st.pads === 1 ? "iPad connected" : st.pads + " iPads connected") + guests
+  return "Waiting for iPad" + guests
 }
 
 function detailLine(st) {
   if (!st.running) return ""
-  var parts = [st.pages === 1 ? "1 page" : st.pages + " pages"]
+  var parts = st.notebook ? [st.notebook] : []
+  parts.push(st.pages === 1 ? "1 page" : st.pages + " pages")
   parts.push(st.views === 1 ? "1 window open" : st.views + " windows open")
   return parts.join(" · ")
 }

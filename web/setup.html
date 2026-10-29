@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16181d">
+<link rel="icon" href="icon.svg">
+<title>Install OpenPad</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="doc">
+<main class="setup">
+  <img src="icon.svg" alt="" class="liblogo big">
+  <h1>Install OpenPad on this iPad</h1>
+  <p class="muted">The installed app keeps your notebooks on the iPad, works with no Wi-Fi, and syncs to
+    <b id="pcname">your computer</b> when you're back on this network.</p>
+
+  <section class="step">
+    <h2><span>1</span> Trust your computer's certificate</h2>
+    <p>The app talks to your computer over an encrypted connection. Your computer made its own certificate for that.
+      It can only vouch for devices on private networks (addresses like 192.168.x.x), not for websites.</p>
+    <a class="btn primary" id="getca">Download the certificate</a>
+    <ol>
+      <li>Tap <b>Allow</b>, then <b>Close</b>.</li>
+      <li>Open <b>Settings</b> › <b>Profile Downloaded</b> › <b>Install</b> (enter your passcode).</li>
+      <li>Open <b>Settings</b> › <b>General</b> › <b>About</b> › <b>Certificate Trust Settings</b>, and turn on
+        <b id="caname">OpenPad</b>.</li>
+    </ol>
+    <p class="small muted">Fingerprint (SHA-256), shown in the profile's details: <code id="fp"></code></p>
+  </section>
+
+  <section class="step">
+    <h2><span>2</span> Add the app to your Home Screen</h2>
+    <a class="btn primary" id="openapp" target="_blank" rel="noopener">Open the app</a>
+    <p>Then tap Share › <b>Add to Home Screen</b> › <b>Add</b>, and open OpenPad from the Home Screen.</p>
+  </section>
+
+  <section class="step">
+    <h2><span>3</span> Pair it</h2>
+    <p>In the app, tap <b>Pair</b> and enter:</p>
+    <div class="pin"><span>Address</span><code id="addr"></code><span>PIN</span><code id="pin"></code></div>
+    <p class="small muted">The PIN changes every 10 minutes. This page updates it.</p>
+  </section>
+
+  <p class="small muted">Rather not install anything? You can keep using OpenPad in Safari from the computer's QR code. It just needs the computer to be on.</p>
+</main>
+<script type="module" src="setup.js"></script>
+</body>
+</html>

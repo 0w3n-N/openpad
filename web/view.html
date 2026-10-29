@@ -3,28 +3,64 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="/icon.svg">
-<title>Inkcast</title>
-<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="icon.svg">
+<title>OpenPad</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body class="view">
 <main id="stage"></main>
 
-<section id="pair" hidden>
-  <div class="card">
-    <img class="logo" src="/icon.svg" alt="">
-    <h1>Inkcast</h1>
-    <p>On your iPad, scan this with the Camera app or open the link in Safari. Both devices need to be on the same Wi-Fi.</p>
-    <img id="qr" alt="QR code for the iPad link">
-    <code id="url"></code>
-    <p class="small"><kbd>Q</kbd> show/hide this · drop a PDF here to write on it</p>
+<section id="pair" class="overlay" hidden>
+  <div class="card wide">
+    <img class="logo" src="icon.svg" alt="">
+    <h1>OpenPad</h1>
+    <div class="seg" id="pairtabs">
+      <button data-tab="quick" class="on">Use in Safari</button>
+      <button data-tab="install">Install the iPad app</button>
+    </div>
+    <div data-pane="quick">
+      <p>Scan this with the iPad Camera app (same Wi-Fi). Notebooks you write there are kept on this computer too.</p>
+      <img id="qr" class="qr" alt="QR code for the iPad link">
+      <code id="url"></code>
+    </div>
+    <div data-pane="install" hidden>
+      <p>The installed app works without this computer and syncs when you're back on this Wi-Fi. Takes about a minute, once:</p>
+      <ol class="steps">
+        <li>Scan this with the iPad Camera. It opens a setup page that installs OpenPad's certificate.</li>
+        <li>On that page, tap <b>Open the app</b>, then Share › <b>Add to Home Screen</b>.</li>
+        <li>Open OpenPad from the Home Screen › <b>Pair</b>, and enter:</li>
+      </ol>
+      <img id="setupqr" class="qr small" alt="QR code for the setup page">
+      <div class="pin"><span>Address</span><code id="pinaddr"></code><span>PIN</span><code id="pincode"></code></div>
+    </div>
+    <p class="small"><kbd>Q</kbd> show/hide · drop a PDF here to add it to this notebook</p>
+  </div>
+</section>
+
+<section id="guests" class="overlay" hidden>
+  <div class="card wide">
+    <h1>Invite people</h1>
+    <p>People with a link see this notebook live and can save it as a PDF. They can't see your other notebooks or this computer.</p>
+    <div class="seg" id="gkind">
+      <button data-kind="w" class="on">Can draw</button>
+      <button data-kind="v">View only</button>
+    </div>
+    <img id="gqr" class="qr" alt="QR code for the guest link">
+    <code id="glink"></code>
+    <div class="actions">
+      <button id="gcopy">Copy link</button>
+      <button id="gnet">Internet link: off</button>
+      <button id="grotate">New links</button>
+    </div>
+    <p class="small" id="gnetinfo"></p>
+    <p class="small" id="gcount"></p>
   </div>
 </section>
 
 <section id="capture-prompt" hidden>
   <div class="card">
     <h1>Show a window on the iPad</h1>
-    <p>Choose the window in the next dialog. It appears on the iPad as a new page you can draw on. Keep this Inkcast window open while it's live.</p>
+    <p>Choose the window in the next dialog. It appears on the iPad as a new page you can draw on. Keep this OpenPad window open while it's live.</p>
     <div class="actions">
       <button id="b-choose" class="primary">Choose a window</button>
       <button id="b-choose-cancel">Cancel</button>
@@ -44,15 +80,16 @@
   <button id="b-follow" class="on" title="Follow the pen while zoomed in (L)">Follow</button>
   <span class="sep"></span>
   <button id="b-live" title="Annotate a desktop window (W)">Window</button>
+  <button id="b-guests" title="Invite people (I)">Invite</button>
   <button id="b-qr" title="Pair an iPad (Q)">Pair</button>
-  <button id="b-pdf" title="Open a PDF (O)">PDF</button>
-  <button id="b-export" title="Save notebook as PDF (S)">Save</button>
+  <button id="b-pdf" title="Add a PDF (O)">PDF</button>
+  <button id="b-export" title="Save as PDF (S)">Save</button>
   <button id="b-full" title="Full screen (F)" aria-label="Full screen">⛶</button>
 </nav>
 <input type="file" id="file" accept="application/pdf,.pdf" hidden>
-<div id="drop" hidden>Drop the PDF to open it</div>
+<div id="drop" hidden>Drop the PDF to add it</div>
 <div id="toast" hidden></div>
 
-<script type="module" src="/view.js"></script>
+<script type="module" src="view.js"></script>
 </body>
 </html>

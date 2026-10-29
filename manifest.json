@@ -1,20 +1,23 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.0w3n-n.inkcast",
-  "name": "Inkcast",
-  "version": "0.4.0",
+  "id": "io.github.0w3n-n.openpad",
+  "name": "OpenPad",
+  "version": "0.5.0",
   "author": "0w3n-N",
   "license": "MIT",
-  "description": "Use an iPad and Apple Pencil as a drawing tablet: write on paper, PDFs or a live view of any desktop window, and share it in a window. Optional AirPlay mirroring. Local network only.",
-  "homepage": "https://github.com/0w3n-N/inkcast",
-  "repository": "https://github.com/0w3n-N/inkcast",
+  "description": "Notes for iPad and Apple Pencil: notebooks with sections and pages, PDF annotation, and a live share window for calls. Guests can watch and write along by link, and every notebook syncs to your computer. Optional AirPlay mirroring.",
+  "homepage": "https://github.com/0w3n-N/openpad",
+  "repository": "https://github.com/0w3n-N/openpad",
   "keywords": [
     "ipad",
     "apple pencil",
+    "notes",
+    "notebook",
+    "pdf",
     "whiteboard",
     "annotate",
+    "sync",
     "airplay",
-    "screen share",
     "education"
   ],
   "kinds": [
@@ -24,8 +27,8 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Inkcast",
-    "description": "Start Inkcast, pair the iPad by QR code, open the share window, annotate a desktop window, and toggle AirPlay mirroring.",
+    "displayName": "OpenPad",
+    "description": "Start OpenPad, pair the iPad, open the share window, invite people, annotate a desktop window, and toggle AirPlay mirroring.",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -38,7 +41,7 @@
       {
         "key": "port",
         "type": "integer",
-        "label": "Whiteboard port",
+        "label": "OpenPad port",
         "min": 1024,
         "max": 65535,
         "step": 1,
