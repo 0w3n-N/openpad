@@ -4,10 +4,10 @@ import SwiftUI
 /// Sections and their pages, OneNote-style.
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @State private var renaming: Section?
+    @State private var renaming: OpenPadCore.Section?
     @State private var newSection = false
     @State private var text = ""
-    @State private var deleting: Section?
+    @State private var deleting: OpenPadCore.Section?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -49,7 +49,7 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private func sectionView(_ sec: Section) -> some View {
+    private func sectionView(_ sec: OpenPadCore.Section) -> some View {
         let sections = model.notebook?.layout.sections ?? []
         let index = sections.firstIndex(where: { $0.id == sec.id }) ?? 0
         VStack(alignment: .leading, spacing: 8) {
