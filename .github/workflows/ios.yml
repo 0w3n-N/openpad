@@ -2,8 +2,9 @@ name: ios
 
 # The native iPad app (ios/). Every push: test the shared core on Linux and
 # macOS, build the app, run it in an iPad simulator against a real OpenPad
-# server, and keep screenshots plus an unsigned .ipa (for sideloading) as
-# artifacts. "Run workflow" with TestFlight secrets set also uploads a build.
+# server (checking it syncs and goes live), and keep screenshots plus an
+# unsigned .ipa (for sideloading) as artifacts. "Run workflow" with the
+# TestFlight box ticked also uploads a signed build (see ios/README.md).
 
 on:
   push:
@@ -17,6 +18,10 @@ on:
 
 permissions:
   contents: read
+
+env:
+  XCODEGEN_URL: https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   core:
@@ -33,3 +38,153 @@ jobs:
         run: |
           swift --version
           swift test
+
+  app:
+    name: App (build, simulator, screenshots)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install XcodeGen (pinned, checksum verified)
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/xcodegen.zip" "$XCODEGEN_URL"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          xcodebuild -version
+          xcodegen generate
+      - name: Pick an iPad simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = json.load(sys.stdin)["devices"]
+          best = None
+          for runtime, items in devs.items():
+              if "iOS" not in runtime:
+                  continue
+              ver = tuple(int(x) for x in runtime.rsplit("iOS-", 1)[-1].split("-"))
+              for d in items:
+                  if "iPad" in d["name"] and (best is None or ver > best[0] or (ver == best[0] and "Pro" in d["name"])):
+                      best = (ver, d["udid"], d["name"])
+          print(best[1]); print(best[2], best[0], file=sys.stderr)
+          ')
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project OpenPad.xcodeproj -scheme OpenPad -configuration Debug -destination "id=$UDID" \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecated|will be an error)|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" build.log
+      - name: Run it against a real OpenPad server
+        run: |
+          export XDG_DATA_HOME="$RUNNER_TEMP/opdata" XDG_RUNTIME_DIR="$RUNNER_TEMP/oprun" OPENPAD_NOTES="$RUNNER_TEMP/opnotes"
+          mkdir -p "$XDG_RUNTIME_DIR" shots
+          python3 -B bin/openpad serve --port 8770 --bind 127.0.0.1 --quiet > server.log 2>&1 &
+          sleep 3
+          KEY=$(cat "$XDG_DATA_HOME/openpad/token")
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" ios/build/Build/Products/Debug-iphonesimulator/OpenPad.app
+          xcrun simctl launch "$UDID" io.github.0w3n-n.openpad -openpadDemo YES -openpadServer http://127.0.0.1:8770 -openpadKey "$KEY"
+          sleep 15
+          xcrun simctl io "$UDID" screenshot shots/1-library.png
+          # The app synced its notebook to the computer.
+          curl -s "http://127.0.0.1:8770/api/sync?k=$KEY" > sync.json
+          python3 -c 'import json; d = json.load(open("sync.json")); t = [n["title"] for n in d["notebooks"]]; print(t); assert "Demo notebook" in t, t'
+          xcrun simctl terminate "$UDID" io.github.0w3n-n.openpad
+          xcrun simctl launch "$UDID" io.github.0w3n-n.openpad -openpadOpen YES
+          sleep 12
+          xcrun simctl io "$UDID" screenshot shots/2-editor.png
+          # Opening it put it on the computer's screen (the live session).
+          curl -s "http://127.0.0.1:8770/api/sync?k=$KEY" > sync2.json
+          python3 -c '
+          import json
+          d = json.load(open("sync2.json"))
+          demo = next(n["id"] for n in d["notebooks"] if n["title"] == "Demo notebook")
+          print("live:", d["live"], "demo:", demo)
+          assert d["live"] == demo, "the app did not put its notebook on screen"
+          '
+          # The readable PDFs are written when the app goes to the background.
+          xcrun simctl launch "$UDID" com.apple.Preferences
+          sleep 10
+          find "$OPENPAD_NOTES" -name "*.pdf" | tee pdfs.txt
+          test -s pdfs.txt
+          cp "$(head -1 pdfs.txt)" shots/3-section.pdf
+      - name: Keep screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ipad-simulator
+          path: |
+            shots/
+            server.log
+            ios/build.log
+          if-no-files-found: warn
+      - name: Unsigned build for sideloading (AltStore, SideStore)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project OpenPad.xcodeproj -scheme OpenPad -configuration Release -destination generic/platform=iOS \
+            -archivePath build/OpenPad.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive 2>&1 | tee archive.log | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true
+          grep -q "ARCHIVE SUCCEEDED" archive.log
+          mkdir -p ipa/Payload
+          cp -R build/OpenPad.xcarchive/Products/Applications/OpenPad.app ipa/Payload/
+          (cd ipa && zip -qr ../OpenPad-unsigned.ipa Payload)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: OpenPad-unsigned-ipa
+          path: ios/OpenPad-unsigned.ipa
+
+  testflight:
+    name: TestFlight
+    if: github.event_name == 'workflow_dispatch' && inputs.testflight
+    needs: app
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check the secrets are set
+        run: |
+          for v in KEY_ID ISSUER_ID KEY_P8 TEAM_ID; do
+            if [ -z "${!v}" ]; then echo "Missing secret for $v (see ios/README.md)"; exit 1; fi
+          done
+      - name: Install XcodeGen (pinned, checksum verified)
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/xcodegen.zip" "$XCODEGEN_URL"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Archive and upload (Xcode-managed signing with the API key)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodegen generate
+          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$KEY_P8" | base64 --decode > "$KEY_PATH"
+          AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID")
+          xcodebuild -project OpenPad.xcodeproj -scheme OpenPad -configuration Release -destination generic/platform=iOS \
+            -archivePath build/OpenPad.xcarchive DEVELOPMENT_TEAM="$TEAM_ID" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            "${AUTH[@]}" archive | tail -20
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive -archivePath build/OpenPad.xcarchive -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/export "${AUTH[@]}" | tail -20
+          rm -f "$KEY_PATH"
