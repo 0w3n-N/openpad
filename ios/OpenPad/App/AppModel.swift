@@ -107,7 +107,10 @@ final class AppModel {
             Task { @MainActor in self?.store.link = l.saved }
         }
         let engine = SyncEngine(link: link, store: store)
-        engine.onState = { [weak self] s in self?.syncState = s }
+        engine.onState = { [weak self] s in
+            self?.syncState = s
+            if s == .ok { self?.refreshLibrary() }  // sync dots on the cards
+        }
         engine.onChanged = { [weak self] id, nb in self?.notebookChanged(id, nb) }
         engine.isBusy = { [weak self] in self?.canvas?.drawingActive ?? false }
         sync = engine

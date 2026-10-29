@@ -267,8 +267,12 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
         canvas.contentSize = size
         backdrop.frame = CGRect(origin: .zero, size: size)
         let insetX = max(16, (canvas.bounds.width - size.width) / 2)
-        let insetY = max(16, (canvas.bounds.height - size.height) / 2)
-        canvas.contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: insetY, right: insetX)
+        // Portrait pages start at the top, like paper (the tool palette sits
+        // at the bottom); wide pages are centered.
+        let spare = max(0, canvas.bounds.height - size.height)
+        let top = pageSize.height > pageSize.width ? min(16, spare) : max(16, spare / 2)
+        let bottom = max(16, spare - top)
+        canvas.contentInset = UIEdgeInsets(top: top, left: insetX, bottom: bottom, right: insetX)
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {

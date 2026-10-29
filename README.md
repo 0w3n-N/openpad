@@ -154,6 +154,15 @@ the folder.
 
 ## Use
 
+### The native iPad app (preview)
+
+A native app (SwiftUI and PencilKit) is in [ios/](ios/README.md). It has
+Apple's own ink and tool palette, and the Pencil's double-tap and squeeze. It
+connects without the certificate step, and works with the same computer side.
+It installs through TestFlight (needs an Apple Developer account), from Xcode
+on a Mac, or by sideloading the unsigned build each CI run produces. The
+instructions below are for the web app, which needs no install.
+
 ### Start it and connect the iPad
 
 Switch OpenPad on from the bar icon (Omarchy), the Start menu (Windows), or

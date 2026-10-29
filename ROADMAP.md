@@ -9,11 +9,9 @@ work on one.
   around the same server, so macOS users don't need a terminal. Everything
   OpenPad does already works on macOS through `bin/openpad`. A wrapper mainly
   adds packaging: a signed, notarized `.app` needs an Apple Developer account.
-- **Native iPad app.** A SwiftUI and PencilKit app speaking the same sync and
-  live-session protocol. It would add the Pencil's barrel double-tap and
-  squeeze (web pages can't receive them), lower ink latency, Files integration,
-  and sync without a certificate install. Building and installing it needs a
-  Mac with Xcode, and distributing it needs the App Store or TestFlight.
+- **Native iPad app.** In progress in `ios/` (SwiftUI + PencilKit, same
+  protocol). Next: shapes and straight-line snapping, continuous scrolling,
+  text boxes, and live preview of strokes while they're being drawn.
 
 ## Notes
 
