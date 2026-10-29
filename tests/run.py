@@ -309,6 +309,12 @@ check("notebooks from clients are validated", bad and bad["title"] == "<b>hi" an
       and bad["pages"]["p"]["strokes"] == [] and bad["pages"]["p"]["gone"] == ["ok"]
       and bad["layout"]["sections"][0]["pages"] == ["p"] and len(bad["layout"]["sections"][0]["title"]) == 80, bad)
 
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import make_vectors  # noqa: E402
+
+check("the iPad app's merge test vectors match these rules (run tests/make_vectors.py)",
+      open(make_vectors.OUT).read() == make_vectors.text())
+
 if shutil.which("node"):
     # The same random edits merged by Python and by web/model.js must agree.
     rng = random.Random(7)

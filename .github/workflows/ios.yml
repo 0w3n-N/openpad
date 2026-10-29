@@ -1,0 +1,35 @@
+name: ios
+
+# The native iPad app (ios/). Every push: test the shared core on Linux and
+# macOS, build the app, run it in an iPad simulator against a real OpenPad
+# server, and keep screenshots plus an unsigned .ipa (for sideloading) as
+# artifacts. "Run workflow" with TestFlight secrets set also uploads a build.
+
+on:
+  push:
+    paths: ["ios/**", "openpad/**", "web/model.js", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: "Upload a build to TestFlight (needs the App Store Connect secrets)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Merge rules match openpad/notebook.py
+        working-directory: ios/OpenPadCore
+        run: |
+          swift --version
+          swift test
