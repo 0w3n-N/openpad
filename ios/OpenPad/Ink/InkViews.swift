@@ -21,7 +21,7 @@ final class InkTiledView: UIView {
     // Read by tiles drawing on background threads.
     private let lock = NSLock()
     private var items: [Item] = []
-    private var hidden: Set<String> = []
+    private var hiddenIDs: Set<String> = []
     // Main thread only: what each stroke looked like when last drawn.
     private var known: [String: (count: Int, box: CGRect)] = [:]
 
@@ -59,9 +59,9 @@ final class InkTiledView: UIView {
         }
         for (id, old) in known where next[id] == nil { dirty.append(old.box) }
         lock.lock()
-        let oldHidden = hidden
+        let oldHidden = hiddenIDs
         items = newItems
-        hidden = newHidden
+        hiddenIDs = newHidden
         lock.unlock()
         for id in oldHidden.symmetricDifference(newHidden) {
             if let b = next[id]?.box ?? known[id]?.box { dirty.append(b) }
@@ -78,7 +78,7 @@ final class InkTiledView: UIView {
     func reset() {
         lock.lock()
         items = []
-        hidden = []
+        hiddenIDs = []
         lock.unlock()
         known = [:]
         setNeedsDisplay()
@@ -88,7 +88,7 @@ final class InkTiledView: UIView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         lock.lock()
-        let items = self.items, hidden = self.hidden
+        let items = self.items, hidden = self.hiddenIDs
         lock.unlock()
         for it in items where it.box.intersects(rect) && !hidden.contains(it.stroke.id) {
             PageRenderer.drawStroke(it.stroke, in: ctx, clip: rect)
