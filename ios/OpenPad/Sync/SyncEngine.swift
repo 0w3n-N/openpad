@@ -123,7 +123,11 @@ final class SyncEngine {
             if remoteDigest[entry.id] == d {
                 if entry.dirty || !entry.filesSynced {
                     try await syncAssets(nb, missing: nil)
-                    store.markSynced(entry.id, digest: d)
+                    // Unless it changed while the files went across.
+                    if let latest = store.load(entry.id), digest(latest) == d {
+                        store.markSynced(entry.id, digest: d)
+                        store.update(entry.id) { $0.filesSynced = true }
+                    }
                 }
                 continue
             }
@@ -134,7 +138,7 @@ final class SyncEngine {
             guard let nb = try? JSONDecoder().decode(Notebook.self, from: data) else { continue }
             store.save(nb, dirty: false, synced: d)
             try await syncAssets(nb, missing: [])
-            store.update(id) { $0.filesSynced = true }
+            if store.index[id]?.dirty == false { store.update(id) { $0.filesSynced = true } }
             store.refreshThumbnails(nb)
             onChanged?(id, nb)
         }

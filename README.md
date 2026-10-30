@@ -14,8 +14,9 @@ Open-source notes for iPad and Apple Pencil, with your computer as the hub.
   window you can share in Zoom, Teams or Meet.
 - **Guests:** send a link, and people can watch live, write with you (if you
   allow it) and save any page as a PDF.
-- **Synced:** every notebook is copied to your computer's disk, with readable
-  PDFs in `Documents/OpenPad`.
+- **A complete copy on your computer:** every notebook syncs into a folder you
+  choose, with a readable PDF of each section. Press Sync, or let it sync by
+  itself.
 - **Desktop annotation:** draw over a live view of any window on your computer.
 
 It runs on Omarchy (as a bar plugin), other Linux distributions, macOS and
@@ -154,14 +155,19 @@ the folder.
 
 ## Use
 
-### The native iPad app (preview)
+### The iPad app
 
-A native app (SwiftUI and PencilKit) is in [ios/](ios/README.md). It has
-Apple's own ink and tool palette, and the Pencil's double-tap and squeeze. It
-connects without the certificate step, and works with the same computer side.
-It installs through TestFlight (needs an Apple Developer account), from Xcode
-on a Mac, or by sideloading the unsigned build each CI run produces. The
-instructions below are for the web app, which needs no install.
+The native app in [ios/](ios/README.md) is the main way to use OpenPad. It
+offers:
+- folders, notebooks, colored sections and titled pages
+- Apple's ink and tool palette, with the Pencil's double-tap and squeeze
+- search across your handwriting and PDFs
+- PDF, scan and photo pages
+- offloading old notebooks to the computer when the iPad fills up
+
+It installs from Xcode on a Mac, or by sideloading the unsigned build each CI
+run produces (see its README). The instructions below also cover the web app,
+which runs in Safari with nothing to install.
 
 ### Start it and connect the iPad
 
@@ -243,15 +249,31 @@ waiting screen, never one of your other notebooks.
 
 ### Sync to the computer
 
-Notebooks sync automatically whenever the iPad and computer can reach each
-other: on start, every 20 seconds while something changed, and when you leave
-the app. Both sides merge, so nothing written on either side is lost, and
-deletions carry over. On the computer:
+Your notes live on the iPad. The computer keeps a complete copy in its sync
+folder (`~/Documents/OpenPad` unless you choose another), laid out like the
+app:
 
-- `Documents/OpenPad/<Notebook>/<Section>.pdf`: readable copies, rebuilt a
-  minute or so after changes. Set `OPENPAD_NOTES` to use another folder.
-- The notebooks themselves, in OpenPad's data folder (see Troubleshooting).
-  Deleted notebooks are kept in its `trash` folder for a while.
+```
+<sync folder>/2025 Fall/ECE 210/
+    Lectures.pdf, Homework.pdf     readable, with your ink
+    .openpad/notebook.json         the notebook itself
+    .openpad/files/                the PDFs and images its pages show
+```
+
+- **Sync button:** press **Sync iPad** in the bar popup, **Sync** in the share
+  window, or run `openpad sync`. OpenPad has to be open on the iPad (same
+  Wi-Fi), because iPadOS doesn't let apps answer from the background.
+- **Automatic sync:** while the app is connected, it also syncs by itself:
+  on start, every 20 seconds while something changed, and when you leave it.
+  Turn that off in the app's settings to sync only on demand.
+- **Choosing the folder:** use the share window's Sync panel, the bar
+  widget's `syncFolder` setting, or `openpad sync-folder ~/School/Notes`. A new
+  folder gets a fresh copy, and the old one is left as it is.
+- **Merging:** both sides merge, so nothing written on either side is lost.
+  Deletions carry over, and a deleted notebook's folder goes to OpenPad's
+  `trash` folder for a while.
+- **Offloading:** when the iPad fills up, old notebooks can be offloaded to
+  the computer (see [ios/README.md](ios/README.md)).
 
 A second iPad paired with the same computer gets the same notebooks.
 
@@ -307,7 +329,7 @@ With a keyboard: `P` pen, `H` highlighter, `E` eraser, `S` select, `L` shapes,
 | Double-click, `0` | zoom 2×, back to fit |
 | `L` | follow the pen while zoomed |
 | `←` `→` Space | change page (the iPad follows) |
-| `I` `Q` `W` | invite, pair, annotate a window |
+| `I` `Q` `W` `Y` | invite, pair, annotate a window, sync |
 | `O` `S` `F` | add a PDF, save as PDF, full screen |
 
 **Guest page:** draw with the mouse, pen or finger; space + drag or the hand
@@ -320,10 +342,10 @@ tool pans; the wheel scrolls; pinch or ctrl + wheel zooms.
 - **Color:** dimmed when off, normal while waiting for the iPad, and the accent
   color while the iPad is connected, a window is live, or mirroring is on.
 - **Keybindings:** `omarchy-shell io.github.0w3n-n.openpad <action>`, where the
-  action is `board`, `invite`, `toggle`, `annotate`, `mirror`, `start` or
-  `stop`.
-- **Settings:** `port`, `airplayName` and `airplayAudio`, on the widget's entry
-  in `~/.config/omarchy/shell.json`.
+  action is `board`, `sync`, `invite`, `toggle`, `annotate`, `mirror`, `start`
+  or `stop`.
+- **Settings:** `port`, `syncFolder`, `airplayName` and `airplayAudio`, on the
+  widget's entry in `~/.config/omarchy/shell.json`.
 
 ## Command line
 
@@ -332,6 +354,8 @@ On Windows, run `openpad` if setup added it to PATH, otherwise `bin\openpad.cmd`
 
 ```
 openpad              start if needed and open the share window
+openpad sync         ask the iPad to sync now (--folder PATH to use another sync folder)
+openpad sync-folder  show or choose the sync folder
 openpad invite       guest links (--internet for a link that works anywhere, --off to stop it)
 openpad annotate     annotate a desktop window (--stop to end it)
 openpad url          print the iPad link and QR code
@@ -366,7 +390,7 @@ Run `openpad doctor` first.
 - **Can't capture a window (macOS).** Allow screen recording for the browser,
   then restart the browser.
 
-| | Data (notebooks, key, certificate) | Readable PDFs | Log |
+| | Data (key, certificate, working copy) | Sync folder (default) | Log |
 | --- | --- | --- | --- |
 | Linux | `~/.local/share/openpad/` | `~/Documents/OpenPad/` | `~/.local/state/openpad/server.log` |
 | macOS | `~/Library/Application Support/openpad/` | `~/Documents/OpenPad/` | `~/Library/Logs/openpad/server.log` |

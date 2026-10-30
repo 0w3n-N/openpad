@@ -3,18 +3,12 @@ name: ios
 # The native iPad app (ios/). Every push: test the shared core on Linux and
 # macOS, build the app, run it in an iPad simulator against a real OpenPad
 # server (checking it syncs and goes live), and keep screenshots plus an
-# unsigned .ipa (for sideloading) as artifacts. "Run workflow" with the
-# TestFlight box ticked also uploads a signed build (see ios/README.md).
+# unsigned .ipa (for sideloading) as artifacts.
 
 on:
   push:
     paths: ["ios/**", "openpad/**", "web/model.js", ".github/workflows/ios.yml"]
   workflow_dispatch:
-    inputs:
-      testflight:
-        description: "Upload a build to TestFlight (needs the App Store Connect secrets)"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -176,52 +170,3 @@ jobs:
         with:
           name: OpenPad-unsigned-ipa
           path: ios/OpenPad-unsigned.ipa
-
-  testflight:
-    name: TestFlight
-    if: github.event_name == 'workflow_dispatch' && inputs.testflight
-    needs: app
-    runs-on: macos-15
-    timeout-minutes: 45
-    env:
-      KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-      ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-      KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY }}
-      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Check the secrets are set
-        run: |
-          for v in KEY_ID ISSUER_ID KEY_P8 TEAM_ID; do
-            if [ -z "${!v}" ]; then echo "Missing secret for $v (see ios/README.md)"; exit 1; fi
-          done
-      - name: Install XcodeGen (pinned, checksum verified)
-        run: |
-          curl -sSL -o "$RUNNER_TEMP/xcodegen.zip" "$XCODEGEN_URL"
-          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
-          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
-      - name: Archive and upload (Xcode-managed signing with the API key)
-        working-directory: ios
-        run: |
-          set -o pipefail
-          xcodegen generate
-          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-          printf '%s' "$KEY_P8" | base64 --decode > "$KEY_PATH"
-          AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID")
-          xcodebuild -project OpenPad.xcodeproj -scheme OpenPad -configuration Release -destination generic/platform=iOS \
-            -archivePath build/OpenPad.xcarchive DEVELOPMENT_TEAM="$TEAM_ID" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            "${AUTH[@]}" archive | tail -20
-          cat > build/ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>upload</string>
-            <key>teamID</key><string>$TEAM_ID</string>
-            <key>signingStyle</key><string>automatic</string>
-          </dict></plist>
-          EOF
-          xcodebuild -exportArchive -archivePath build/OpenPad.xcarchive -exportOptionsPlist build/ExportOptions.plist \
-            -exportPath build/export "${AUTH[@]}" | tail -20
-          rm -f "$KEY_PATH"

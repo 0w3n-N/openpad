@@ -95,6 +95,21 @@ what the plugin does on your system.
   iPad (Settings › General › VPN & Device Management) and delete `tls/` on the
   computer.
 
+## The sync folder
+
+The copy of your notebooks is written only by the server, with the owner key
+required to choose its location (`/api/settings`), and only to a folder of its
+own: not `/`, your home folder itself, or OpenPad's data folder. Folder and
+notebook names are reduced to safe path segments (no separators, no leading
+dots), so names can't point outside it. Folders OpenPad creates are mode 700
+and files 600. Changing the folder leaves the old copy in place; nothing is
+deleted there except files OpenPad wrote itself (a renamed section's old PDF, a
+deleted notebook's folder, which moves to OpenPad's trash).
+
+The computer's **Sync** button only asks connected notes apps to sync; it can't
+read anything from the iPad by itself. Only the notes app (owner key, `pad`
+role) can report a sync as done.
+
 ## Internet links (optional)
 
 Off unless you switch them on. OpenPad then runs `cloudflared tunnel --url
