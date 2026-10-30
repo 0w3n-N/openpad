@@ -1,7 +1,6 @@
 import Foundation
 import Observation
 import OpenPadCore
-import PencilKit
 import UIKit
 
 /// Extra running time after the app goes to the background.
@@ -14,6 +13,11 @@ final class BackgroundTask: @unchecked Sendable {
         UIApplication.shared.endBackgroundTask(id)
         id = .invalid
     }
+}
+
+/// The drawing tools (web/editor.js's tools).
+enum InkTool: String, CaseIterable {
+    case pen, highlighter, eraser, lasso, shape
 }
 
 struct Peers: Equatable {
@@ -57,6 +61,30 @@ final class AppModel {
             canvas?.applySettings()
         }
     }
+    // The drawing tools, kept between launches (except the eraser and lasso).
+    var tool: InkTool = InkTool(rawValue: UserDefaults.standard.string(forKey: "tool") ?? "") ?? .pen {
+        didSet {
+            UserDefaults.standard.set([.pen, .highlighter, .shape].contains(tool) ? tool.rawValue : previousTool.rawValue, forKey: "tool")
+            canvas?.toolChanged()
+        }
+    }
+    @ObservationIgnored var previousTool: InkTool = .pen
+    var shape: Ink.Shape = Ink.Shape(rawValue: UserDefaults.standard.string(forKey: "shape") ?? "") ?? .line {
+        didSet { UserDefaults.standard.set(shape.rawValue, forKey: "shape") }
+    }
+    var color: String = UserDefaults.standard.string(forKey: "color").flatMap { Ink.colors.contains($0) ? $0 : nil } ?? Ink.colors[0] {
+        didSet { UserDefaults.standard.set(color, forKey: "color") }
+    }
+    var width: Double = UserDefaults.standard.object(forKey: "width").flatMap { $0 as? Double }.flatMap { Ink.widths.contains($0) ? $0 : nil } ?? 3.5 {
+        didSet { UserDefaults.standard.set(width, forKey: "width") }
+    }
+    /// How much pressing harder thickens the line (0: an even line).
+    var pressure: Double = UserDefaults.standard.object(forKey: "pressure") as? Double ?? 0.35 {
+        didSet { UserDefaults.standard.set(pressure, forKey: "pressure") }
+    }
+    var canUndo = false
+    var canRedo = false
+
     /// Sync by itself whenever the computer is reachable (otherwise: Sync buttons only).
     var autoSync: Bool = UserDefaults.standard.object(forKey: "autoSync") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoSync, forKey: "autoSync") }
@@ -222,12 +250,65 @@ final class AppModel {
         }
     }
 
-    /// A stroke still being drawn (PencilKit only hands over finished ones),
-    /// so the share window and guests see it as it's written.
-    func sendPreview(id: String, points: [[Double]], tool: PKTool, end: Bool) {
-        guard liveReady, cast, let pageID, let ink = tool as? PKInkingTool else { return }
-        live?.send(["t": "preview", "page": pageID, "id": id, "pts": points, "end": end,
-                    "tool": ink.inkType == .marker ? "hl" : "pen", "color": ink.color.hexString, "width": Double(ink.width)])
+    // MARK: - drawing tools
+
+    func setTool(_ t: InkTool) {
+        if t == .eraser, tool != .eraser { previousTool = tool }
+        tool = t
+    }
+
+    /// The Pencil's double-tap (or squeeze), when set to switch to the eraser.
+    func toggleEraser() {
+        setTool(tool == .eraser ? previousTool : .eraser)
+        say(tool == .eraser ? "Eraser" : tool == .highlighter ? "Highlighter" : tool == .shape ? "Shapes" : "Pen", seconds: 0.7)
+    }
+
+    /// The Pencil's double-tap, when set to switch to the previous tool.
+    func switchToPreviousTool() {
+        let p = previousTool
+        previousTool = tool
+        tool = p
+    }
+
+    /// A color from the toolbar: recolors a selection, and otherwise picks
+    /// the pen back up if the eraser or lasso was in hand.
+    func pickColor(_ c: String) {
+        color = c
+        if tool == .eraser || tool == .lasso {
+            if let canvas, canvas.hasSelection { return canvas.recolorSelection(c) }
+            setTool(.pen)
+        }
+    }
+
+    // MARK: - strokes from this iPad
+
+    /// A stroke has started: the computer shows it as it's written.
+    func strokeStarted(page: String, stroke: Stroke) {
+        send(["t": "begin", "page": page, "s": jsonObject(stroke)])
+    }
+
+    func strokePoints(id: String, points: [[Double]]) {
+        send(["t": "pts", "id": id, "pts": points])
+    }
+
+    /// The stroke is done: keep it.
+    func strokeFinished(page: String, stroke: Stroke) {
+        guard var nb = notebook else { return }
+        apply(.begin(page: page, stroke: stroke), to: &nb)
+        notebook = nb
+        saveSoon()
+        send(["t": "end", "id": stroke.id])
+        canvasReload()
+    }
+
+    /// A stroke that was started but isn't kept (cancelled, or replaced by a
+    /// straight line).
+    func strokeCancelled(page: String, id: String) {
+        guard var nb = notebook else { return }
+        apply(.remove(page: page, ids: [id]), to: &nb)
+        notebook = nb
+        saveSoon()
+        send(["t": "remove", "page": page, "ids": [id]])
     }
 
     // MARK: - live session messages
@@ -267,17 +348,23 @@ final class AppModel {
             guard liveReady, let page = m["page"] as? String, notebook?.pages[page] != nil else { return }
             show(page, tell: false)
         case "end":
-            // PencilKit can't show half a stroke, so strokes appear when they end.
-            guard liveReady, let id = m["id"] as? String, let pageID else { return }
-            if notebook?.pages[pageID]?.strokes.contains(where: { $0.id == id }) == true { canvasReload() }
+            guard liveReady, let id = m["id"] as? String else { return }
+            canvas?.remoteEnded(id)
             saveSoon()
         case "begin", "pts", "remove", "restore":
             guard liveReady, var nb = notebook, let op = liveOp(t, m) else { return }
             let page = apply(op, to: &nb)
             notebook = nb
-            if t == "remove" || t == "restore" {
+            switch op {
+            case let .begin(_, stroke) where page == pageID:
+                canvas?.remoteBegan(stroke.id)
+            case let .points(id, _) where page == pageID:
+                canvas?.remoteMoved(id)
+            case .remove, .restore:
                 if page == pageID { canvasReload() }
                 saveSoon()
+            default:
+                break
             }
         default:
             break
@@ -606,6 +693,7 @@ final class AppModel {
             send(["t": "begin", "page": page, "s": jsonObject(s)])
             send(["t": "end", "id": s.id])
         }
+        if page == pageID { canvasReload() }
     }
 
     /// A structural edit: new layout (and pages), sent as a partial notebook.

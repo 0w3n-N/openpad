@@ -79,6 +79,7 @@ enum DemoLaunch {
             }
             let s = Stroke(id: "cistroke01", z: nextZ(), tool: "pen", color: "#30a46c", width: 5, pts: pts)
             model.localStrokes(page: page, added: [s], removed: [])
+            if defaults.bool(forKey: "openpadInkTest") { model.canvas?.runInkTest() }
         }
     }
 }

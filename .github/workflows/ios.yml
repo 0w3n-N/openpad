@@ -99,11 +99,27 @@ jobs:
           xcrun simctl terminate "$UDID" "$APP"
 
           echo "== 2. live: the iPad's strokes reach the computer, guests' strokes reach the iPad"
-          xcrun simctl launch "$UDID" "$APP" -openpadOpen YES -openpadDrawTest YES
+          xcrun simctl launch "$UDID" "$APP" -openpadOpen YES -openpadDrawTest YES -openpadInkTest YES
           sleep 14
           xcrun simctl io "$UDID" screenshot shots/2-editor.png
           curl -s "$API/api/sync?k=$KEY" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["live"] == sys.argv[1], d["live"]' "$DEMO"
           curl -s "$API/api/sync/nb/$DEMO?k=$KEY" | grep -q cistroke01
+          # Every tool, drawn through the iPad's own ink code (DemoLaunch -openpadInkTest).
+          curl -s "$API/api/sync/nb/$DEMO?k=$KEY" | python3 -c '
+          import json, sys
+          nb = json.load(sys.stdin)
+          page = next(p for p in nb["pages"].values() if any(s["id"] == "cistroke01" for s in p["strokes"]))
+          ss = page["strokes"]
+          pen = [s for s in ss if s["color"] == "#1f5fd6" and s["width"] == 6.5 and s["tool"] == "pen"]
+          hl = [s for s in ss if s["tool"] == "hl" and s["color"] == "#ffd400" and s["width"] == 34]
+          box = [s for s in ss if len(s["pts"]) == 9 and s["pts"][0][:2] == [650, 350]]
+          old_box = [s for s in ss if s["pts"] and s["pts"][0][:2] == [600, 300]]
+          print("pen", [len(s["pts"]) for s in pen], "highlighter", len(hl), "moved box", len(box), "old box", len(old_box), "gone", len(page["gone"]))
+          assert len(pen) == 1 and len(pen[0]["pts"]) >= 30, "pen stroke (erased, then undone)"
+          assert len(hl) == 1, "highlighter"
+          assert len(box) == 1 and not old_box, "box drawn, lassoed and moved"
+          assert len(page["gone"]) >= 2, "the erased pen stroke and the box before it moved are tombstoned"
+          '
           GUEST=$(curl -s "$API/api/info?k=$KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["guests"]["w"].split("#w=")[1])')
           python3 ios/ci/guest_stroke.py 8770 "$GUEST" guestci1
           sleep 4

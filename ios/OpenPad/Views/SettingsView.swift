@@ -1,4 +1,6 @@
+import OpenPadCore
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
@@ -11,11 +13,20 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section("Writing") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Pressure sensitivity", value: "\(Int((model.pressure * 100).rounded()))")
+                        Slider(value: $model.pressure, in: 0...1, step: 0.05)
+                        PressurePreview(sensitivity: model.pressure)
+                            .aspectRatio(560.0 / 90.0, contentMode: .fit)
+                        Text("How much pressing harder thickens the line. 0 draws an even line.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Toggle("Draw with your finger too", isOn: $model.fingerDrawing)
                     Text("""
-                    Pens, colors, widths, the eraser, the lasso and the ruler are in the tool palette. \
-                    Pick the Monoline pen for lines that don’t change with pressure. Double-tap (or squeeze) \
-                    the Apple Pencil to switch tools; choose what it does in Settings › Apple Pencil.
+                    With your finger drawing, scroll and zoom with two fingers. Double-tap (or squeeze) the \
+                    Apple Pencil to switch to the eraser and back; choose what it does in Settings › Apple Pencil. \
+                    Hold the Pencil still at the end of a stroke to make it a straight line.
                     """)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -82,5 +93,33 @@ struct SettingsView: View {
                 Text("Your notebooks stay on this iPad. Connect again by scanning the computer’s QR code.")
             }
         }
+    }
+}
+
+/// A sample stroke whose pressure rises and falls, drawn with the setting
+/// (as in the web app's settings).
+struct PressurePreview: View {
+    let sensitivity: Double
+
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.withCGContext { cg in
+                cg.setFillColor(UIColor.white.cgColor)
+                cg.fill(CGRect(origin: .zero, size: size))
+                let k = size.width / 560
+                cg.scaleBy(x: k, y: k)
+                var pts: [[Double]] = []
+                var prev: Double?
+                for i in 0...80 {
+                    let raw = 0.08 + 0.85 * pow(sin(Double(i) / 80 * .pi), 2)
+                    let p = Ink.shapePressure(raw, sensitivity: sensitivity, previous: prev)
+                    prev = p
+                    pts.append([20 + Double(i) * 6.5, 45 + sin(Double(i) / 7) * 18, p])
+                }
+                PageRenderer.drawStroke(Stroke(id: "preview", z: 0, tool: "pen", color: "#111111", width: 5, pts: pts), in: cg)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityHidden(true)
     }
 }

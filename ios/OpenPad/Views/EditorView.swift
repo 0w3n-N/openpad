@@ -3,7 +3,7 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The PencilKit page, bridged into SwiftUI.
+/// The page and its ink, bridged into SwiftUI.
 struct PageCanvas: UIViewControllerRepresentable {
     let model: AppModel
 
@@ -39,6 +39,8 @@ struct EditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             bar
+            Divider()
+            ToolRow()
             Divider()
             HStack(spacing: 0) {
                 if sidebar {
@@ -118,11 +120,6 @@ struct EditorView: View {
             .padding(.leading, 6)
             .accessibilityLabel("Page title")
             Spacer(minLength: 8)
-            Button { model.canvas?.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 38, height: 38) }
-                .accessibilityLabel("Undo")
-            Button { model.canvas?.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 38, height: 38) }
-                .accessibilityLabel("Redo")
-            Divider().frame(height: 22).padding(.horizontal, 4)
             Button { model.go(-1) } label: { Image(systemName: "chevron.up").frame(width: 34, height: 38) }
                 .disabled(position.index <= 0)
                 .accessibilityLabel("Previous page")
@@ -299,5 +296,136 @@ struct PDFFile: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
+    }
+}
+
+/// The drawing tools, as in the web app: pen, highlighter, eraser, select and
+/// move, shapes; colors; widths; undo and redo.
+struct ToolRow: View {
+    @Environment(AppModel.self) private var model
+    @State private var choosingShape = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                tool(.pen, "pencil.tip", "Pen")
+                tool(.highlighter, "highlighter", "Highlighter")
+                tool(.eraser, "eraser", "Eraser")
+                tool(.lasso, "lasso", "Select and move")
+                shapeButton
+                divider
+                ForEach(Ink.colors, id: \.self) { c in
+                    Button { model.pickColor(c) } label: {
+                        Circle()
+                            .fill(Color(UIColor(hex: c)))
+                            .overlay(Circle().strokeBorder(Color.secondary.opacity(c == "#ffffff" ? 0.6 : 0.2), lineWidth: 1))
+                            .frame(width: 24, height: 24)
+                            .padding(4)
+                            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: model.color == c ? 2.5 : 0))
+                            .frame(width: 38, height: 38)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Color \(c)")
+                    .accessibilityAddTraits(model.color == c ? .isSelected : [])
+                }
+                divider
+                ForEach(Array(Ink.widths.enumerated()), id: \.offset) { i, w in
+                    Button { model.width = w } label: {
+                        Circle()
+                            .fill(Color.primary)
+                            .frame(width: [5.0, 9, 14][i], height: [5.0, 9, 14][i])
+                            .frame(width: 34, height: 34)
+                            .background(model.width == w ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(["Fine", "Medium", "Bold"][i])
+                    .accessibilityAddTraits(model.width == w ? .isSelected : [])
+                }
+                divider
+                Button { model.canvas?.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 38, height: 34) }
+                    .disabled(!model.canUndo)
+                    .accessibilityLabel("Undo")
+                Button { model.canvas?.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 38, height: 34) }
+                    .disabled(!model.canRedo)
+                    .accessibilityLabel("Redo")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity)
+        }
+        .background(.bar)
+    }
+
+    private var divider: some View {
+        Divider().frame(height: 22).padding(.horizontal, 6)
+    }
+
+    private func tool(_ t: InkTool, _ icon: String, _ label: String) -> some View {
+        Button { model.setTool(t) } label: {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .frame(width: 38, height: 34)
+                .background(model.tool == t ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(model.tool == t ? .isSelected : [])
+    }
+
+    private static func icon(_ s: Ink.Shape) -> String {
+        switch s {
+        case .line: return "line.diagonal"
+        case .arrow: return "arrow.up.right"
+        case .rect: return "rectangle"
+        case .ellipse: return "oval"
+        case .axes: return "chart.xyaxis.line"
+        }
+    }
+
+    private static func name(_ s: Ink.Shape) -> String {
+        switch s {
+        case .line: return "Line"
+        case .arrow: return "Arrow"
+        case .rect: return "Box"
+        case .ellipse: return "Ellipse"
+        case .axes: return "Axes"
+        }
+    }
+
+    /// Picks the shape tool; tapped again, chooses the shape.
+    private var shapeButton: some View {
+        Button {
+            if model.tool == .shape { choosingShape = true } else { model.setTool(.shape) }
+        } label: {
+            Image(systemName: Self.icon(model.shape))
+                .font(.system(size: 17))
+                .frame(width: 38, height: 34)
+                .background(model.tool == .shape ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .accessibilityLabel("Shapes: \(Self.name(model.shape))")
+        .accessibilityAddTraits(model.tool == .shape ? .isSelected : [])
+        .popover(isPresented: $choosingShape) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Ink.Shape.allCases, id: \.self) { s in
+                    Button {
+                        model.shape = s
+                        choosingShape = false
+                    } label: {
+                        Label(Self.name(s), systemImage: Self.icon(s))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(model.shape == s ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("Tip: hold the Pencil still at the end of a stroke to straighten it.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(12)
+            }
+            .padding(8)
+            .frame(width: 260)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }

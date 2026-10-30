@@ -160,7 +160,8 @@ the folder.
 The native app in [ios/](ios/README.md) is the main way to use OpenPad. It
 offers:
 - folders, notebooks, colored sections and titled pages
-- Apple's ink and tool palette, with the Pencil's double-tap and squeeze
+- the same tools and ink as the web app: pen, highlighter, eraser, select and
+  move, shapes, a pressure setting, and the Pencil's double-tap and squeeze
 - search across your handwriting and PDFs
 - PDF, scan and photo pages
 - offloading old notebooks to the computer when the iPad fills up

@@ -106,7 +106,8 @@ enum PageRenderer {
 
     /// Ink, exactly as web/ink.js draws it: quadratic segments through the
     /// midpoints, with the width following pressure.
-    static func drawStroke(_ s: Stroke, in ctx: CGContext) {
+    /// `clip` (page units) skips the pieces of a long stroke outside it.
+    static func drawStroke(_ s: Stroke, in ctx: CGContext, clip: CGRect? = nil) {
         let p = s.pts.filter { $0.count >= 2 }
         guard let first = p.first else { return }
         let color = UIColor(hex: s.color).cgColor
@@ -131,7 +132,14 @@ enum PageRenderer {
             let r = max(0.1, width(first) / 2)
             ctx.fillEllipse(in: CGRect(x: first[0] - Double(r), y: first[1] - Double(r), width: Double(r * 2), height: Double(r * 2)))
         } else {
+            let margin = CGFloat(s.width) * 1.5
             forEachSegment(p) { start, c, end, isLine, i in
+                if let clip {
+                    let x0 = min(start.x, c.x, end.x), y0 = min(start.y, c.y, end.y)
+                    let box = CGRect(x: x0, y: y0, width: max(start.x, c.x, end.x) - x0, height: max(start.y, c.y, end.y) - y0)
+                        .insetBy(dx: -margin, dy: -margin)
+                    if !box.intersects(clip) { return }
+                }
                 ctx.setLineWidth(width(p[i]))
                 ctx.move(to: start)
                 if isLine { ctx.addLine(to: end) } else { ctx.addQuadCurve(to: end, control: c) }
@@ -209,5 +217,15 @@ final class PDFAssets: @unchecked Sendable {
             let w = rotated ? box.height : box.width, h = rotated ? box.width : box.height
             return [(Double(w) * 100).rounded() / 100, (Double(h) * 100).rounded() / 100]
         }
+    }
+}
+
+extension UIColor {
+    /// A stroke's #rrggbb color.
+    convenience init(hex: String) {
+        let s = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        let v: UInt64 = s.count == 6 ? (UInt64(s, radix: 16) ?? 0x111111) : 0x111111
+        self.init(red: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255,
+                  blue: CGFloat(v & 0xff) / 255, alpha: 1)
     }
 }

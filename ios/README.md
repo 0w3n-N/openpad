@@ -1,7 +1,7 @@
 # OpenPad for iPad (native)
 
 The main OpenPad app: a notes app for iPad and Apple Pencil, built with
-SwiftUI and PencilKit. The computer side (Omarchy plugin, share window, guests,
+SwiftUI and its own ink engine. The computer side (Omarchy plugin, share window, guests,
 sync folder) works with it unchanged, over the same protocol as the web app.
 
 ## How it's organized
@@ -15,9 +15,13 @@ sync folder) works with it unchanged, over the same protocol as the web app.
 - **Search** covers notebook, section and page titles, your handwriting
   (recognized on the iPad by Apple's Vision framework) and the text of PDFs.
 
-Writing uses Apple's tool palette: pens, highlighter, eraser, lasso and ruler.
-Double-tapping or squeezing the Pencil switches tools, as set in Settings ›
-Apple Pencil.
+The tools are the web app's: pen, highlighter, eraser, select and move
+(the lasso), and shapes (line, arrow, box, ellipse, axes), with seven colors
+and three widths. Hold the Pencil still at the end of a stroke to straighten
+it. Settings › Pressure sensitivity sets how much pressing harder thickens the
+line. Double-tapping or squeezing the Pencil switches to the eraser and back
+(or as set in Settings › Apple Pencil). Ink is drawn the same way here, on
+the computer and in PDFs.
 
 ## Where your notes live
 
@@ -48,7 +52,7 @@ you can write on, and the whole set becomes one notebook.
 - `OpenPadCore/`: notebooks, the merge rules and the pairing code, as a Swift
   package. It builds on Linux too. Its tests check the merge rules against
   `tests/make_vectors.py`, which comes from `openpad/notebook.py`.
-- `OpenPad/`: the app: library and search, the PencilKit editor, storage and
+- `OpenPad/`: the app: library and search, the editor and its ink engine, storage and
   offloading, sync, the live session and PDF export.
 - `project.yml`: the Xcode project spec, for XcodeGen.
 
