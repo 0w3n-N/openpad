@@ -20,6 +20,7 @@ enum DemoLaunch {
         }
         guard defaults.bool(forKey: "openpadDemo"), !model.store.library.contains(where: { $0.title == "Demo notebook" }) else { return }
         var nb = newNotebook(title: "Demo notebook", size: .letter, section: "Kinematics", paper: "lines")
+        nb.folder = "2025 Fall/ECE 210"
         let pid = nb.order[0]
         var wave: [[Double]] = []
         for i in 0...80 {
@@ -54,8 +55,31 @@ enum DemoLaunch {
     }
 
     static func open(_ model: AppModel) {
+        if defaults.bool(forKey: "openpadOffloadAll") {
+            // Wait for the first sync, then offload everything the computer has.
+            Task {
+                for _ in 0..<60 where model.syncState != .ok { try? await Task.sleep(nanoseconds: 500_000_000) }
+                model.enforceStorageLimit(force: true)
+            }
+        }
         guard defaults.bool(forKey: "openpadOpen"), let entry = model.store.library.first(where: { $0.title == "Demo notebook" }) else { return }
-        model.open(entry.id)
+        Task {
+            // An offloaded notebook downloads once the computer is reachable.
+            for _ in 0..<40 where entry.offloaded && model.syncState != .ok { try? await Task.sleep(nanoseconds: 500_000_000) }
+            model.open(entry.id)
+            guard defaults.bool(forKey: "openpadDrawTest") else { return }
+            // A stroke "drawn" here once the notebook is live on the computer.
+            for _ in 0..<60 where !model.liveReady { try? await Task.sleep(nanoseconds: 500_000_000) }
+            guard let page = model.pageID else { return }
+            var pts: [[Double]] = []
+            for i in 0...30 {
+                let x: Double = 200 + Double(i) * 12
+                let y: Double = 700 + cos(Double(i) / 3) * 40
+                pts.append([x, y, 0.6])
+            }
+            let s = Stroke(id: "cistroke01", z: nextZ(), tool: "pen", color: "#30a46c", width: 5, pts: pts)
+            model.localStrokes(page: page, added: [s], removed: [])
+        }
     }
 }
 #endif

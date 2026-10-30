@@ -1,45 +1,50 @@
 import OpenPadCore
 import SwiftUI
 
-/// Sections and their pages, OneNote-style.
+/// Section tab colors (stored as #rrggbb, so every device shows the same).
+let sectionColors: [(String, String)] = [
+    ("Red", "#e5484d"), ("Orange", "#f76b15"), ("Yellow", "#ffc53d"), ("Green", "#30a46c"),
+    ("Teal", "#12a594"), ("Blue", "#3e63dd"), ("Purple", "#8e4ec6"), ("Pink", "#d6409f"),
+]
+
+/// Sections (colored tabs) and the pages of the selected one, with titles.
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @State private var renaming: OpenPadCore.Section?
+    @State private var selected: String?  // section shown in the page list
+    @State private var renamingSection: OpenPadCore.Section?
+    @State private var renamingPage: String?
     @State private var newSection = false
     @State private var text = ""
     @State private var deleting: OpenPadCore.Section?
 
+    private var sections: [OpenPadCore.Section] { model.notebook?.layout.sections ?? [] }
+    private var current: OpenPadCore.Section? {
+        let id = selected ?? model.pageID.flatMap { model.notebook?.section(of: $0)?.id }
+        return sections.first { $0.id == id } ?? sections.first
+    }
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack {
-                        Text("Sections").font(.headline)
-                        Spacer()
-                        Button("Section", systemImage: "plus") {
-                            text = "Lecture"
-                            newSection = true
-                        }
-                        .labelStyle(.titleAndIcon)
-                        .font(.subheadline)
-                    }
-                    ForEach(model.notebook?.layout.sections ?? []) { sec in
-                        sectionView(sec)
-                    }
-                }
-                .padding(12)
-            }
-            .onAppear { if let id = model.pageID { proxy.scrollTo(id, anchor: .center) } }
+        VStack(spacing: 0) {
+            sectionList
+                .frame(maxHeight: 260)
+            Divider()
+            pageList
         }
         .background(Color(.secondarySystemBackground))
+        .onChange(of: model.pageID) { _, _ in selected = nil }
         .alert("New section", isPresented: $newSection) {
-            TextField("Name", text: $text)
+            TextField("e.g. Homework", text: $text)
             Button("Add") { model.addSection(text.isEmpty ? "Section" : text) }
             Button("Cancel", role: .cancel) {}
         }
-        .alert("Rename section", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        .alert("Rename section", isPresented: Binding(get: { renamingSection != nil }, set: { if !$0 { renamingSection = nil } })) {
             TextField("Name", text: $text)
-            Button("Rename") { if let s = renaming { model.renameSection(s.id, to: text) } }
+            Button("Rename") { if let s = renamingSection { model.renameSection(s.id, to: text) } }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Page title", isPresented: Binding(get: { renamingPage != nil }, set: { if !$0 { renamingPage = nil } })) {
+            TextField("e.g. Lecture 4: Laplace transforms", text: $text)
+            Button("Save") { if let p = renamingPage { model.setPageTitle(p, text) } }
             Button("Cancel", role: .cancel) {}
         }
         .confirmationDialog("Delete “\(deleting?.title ?? "")” and its pages?",
@@ -48,70 +53,159 @@ struct SidebarView: View {
         }
     }
 
-    @ViewBuilder
-    private func sectionView(_ sec: OpenPadCore.Section) -> some View {
-        let sections = model.notebook?.layout.sections ?? []
-        let index = sections.firstIndex(where: { $0.id == sec.id }) ?? 0
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Menu {
-                    Button("Rename", systemImage: "pencil") {
-                        text = sec.title
-                        renaming = sec
-                    }
-                    Button("Add a page", systemImage: "plus") { model.addPage(after: sec.pages.last) }
-                    if index > 0 { Button("Move up", systemImage: "arrow.up") { model.moveSection(sec.id, by: -1) } }
-                    if index < sections.count - 1 { Button("Move down", systemImage: "arrow.down") { model.moveSection(sec.id, by: 1) } }
-                    if sections.count > 1 { Button("Delete", systemImage: "trash", role: .destructive) { deleting = sec } }
-                } label: {
-                    Text(sec.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+    // MARK: sections
+
+    private var sectionList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Sections").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        text = ""
+                        newSection = true
+                    } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("New section")
                 }
-                Spacer()
-                Button { model.addPage(after: sec.pages.last) } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add a page to \(sec.title)")
-            }
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                ForEach(Array(sec.pages.enumerated()), id: \.element) { i, pid in
-                    PageThumb(pageID: pid, number: i + 1)
-                        .id(pid)
-                        .onTapGesture { model.show(pid) }
-                        .contextMenu {
-                            ForEach(sections.filter { $0.id != sec.id }) { other in
-                                Button("Move to \(other.title)") { model.movePage(pid, toSection: other.id) }
-                            }
-                            Button("Delete page", systemImage: "trash", role: .destructive) { model.deletePage(pid) }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                ForEach(Array(sections.enumerated()), id: \.element.id) { i, sec in
+                    Button {
+                        selected = sec.id
+                        if !(model.pageID.map(sec.pages.contains) ?? false) { model.show(sec.pages.first) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(sec.color.map { Color(UIColor(hex: $0)) } ?? Color.gray.opacity(0.5))
+                                .frame(width: 5, height: 22)
+                            Text(sec.title).lineLimit(1)
+                            Spacer()
+                            Text("\(sec.pages.count)").font(.caption).foregroundStyle(.secondary)
                         }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(current?.id == sec.id ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 6)
+                    .contextMenu { sectionMenu(sec, index: i) }
                 }
             }
         }
     }
+
+    @ViewBuilder
+    private func sectionMenu(_ sec: OpenPadCore.Section, index: Int) -> some View {
+        Button("Rename", systemImage: "pencil") {
+            text = sec.title
+            renamingSection = sec
+        }
+        Menu("Color") {
+            ForEach(sectionColors, id: \.1) { name, hex in
+                Button(name) { model.setSectionColor(sec.id, hex) }
+            }
+            Button("None") { model.setSectionColor(sec.id, nil) }
+        }
+        Button("Add a page", systemImage: "plus") { model.addPage(after: sec.pages.last) }
+        if index > 0 { Button("Move up", systemImage: "arrow.up") { model.moveSection(sec.id, by: -1) } }
+        if index < sections.count - 1 { Button("Move down", systemImage: "arrow.down") { model.moveSection(sec.id, by: 1) } }
+        if sections.count > 1 { Button("Delete", systemImage: "trash", role: .destructive) { deleting = sec } }
+    }
+
+    // MARK: pages
+
+    private var pageList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(current?.title ?? "Pages").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Button { model.addPage(after: current?.pages.last) } label: { Image(systemName: "plus") }
+                            .accessibilityLabel("New page")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    if let sec = current {
+                        ForEach(Array(sec.pages.enumerated()), id: \.element) { i, pid in
+                            PageRow(pageID: pid, number: i + 1, selected: model.pageID == pid)
+                                .id(pid)
+                                .onTapGesture { model.show(pid) }
+                                .contextMenu { pageMenu(pid, sec: sec, index: i) }
+                        }
+                    }
+                }
+                .padding(.bottom, 20)
+            }
+            .onAppear { if let id = model.pageID { proxy.scrollTo(id, anchor: .center) } }
+        }
+    }
+
+    @ViewBuilder
+    private func pageMenu(_ pid: String, sec: OpenPadCore.Section, index: Int) -> some View {
+        Button("Title…", systemImage: "character.cursor.ibeam") {
+            text = model.notebook?.pages[pid]?.title ?? ""
+            renamingPage = pid
+        }
+        Button("New page after this", systemImage: "plus") { model.addPage(after: pid) }
+        if index > 0 { Button("Move up", systemImage: "arrow.up") { model.movePage(pid, by: -1) } }
+        if index < sec.pages.count - 1 { Button("Move down", systemImage: "arrow.down") { model.movePage(pid, by: 1) } }
+        if sections.count > 1 {
+            Menu("Move to section") {
+                ForEach(sections.filter { $0.id != sec.id }) { other in
+                    Button(other.title) { model.movePage(pid, toSection: other.id) }
+                }
+            }
+        }
+        if (model.notebook?.order.count ?? 0) > 1 {
+            Button("Delete page", systemImage: "trash", role: .destructive) { model.deletePage(pid) }
+        }
+    }
 }
 
-struct PageThumb: View {
+struct PageRow: View {
     @Environment(AppModel.self) private var model
     let pageID: String
     let number: Int
+    let selected: Bool
 
     var body: some View {
         let page = model.notebook?.pages[pageID]
-        ZStack(alignment: .bottomTrailing) {
-            if let page {
-                Image(uiImage: ThumbCache.shared.image(page, store: model.store))
-                    .resizable()
-                    .aspectRatio(CGFloat(page.w / page.h), contentMode: .fit)
+        HStack(spacing: 10) {
+            Group {
+                if let page {
+                    Image(uiImage: ThumbCache.shared.image(page, store: model.store))
+                        .resizable()
+                        .aspectRatio(CGFloat(page.w / page.h), contentMode: .fit)
+                }
             }
-            Text("\(number)").font(.caption2).foregroundStyle(.gray).padding(3)
+            .frame(width: 46, height: 58)
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(.separator), lineWidth: 0.5))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(page.map { $0.title.isEmpty ? "Page \(number)" : $0.title } ?? "")
+                    .font(.subheadline)
+                    .foregroundStyle(page?.title.isEmpty ?? true ? Color.secondary : Color.primary)
+                    .lineLimit(2)
+                if let page, page.bg?.pdf != nil {
+                    Text("PDF page \(page.bg?.n ?? 0)").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
         }
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(model.pageID == pageID ? Color.accentColor : Color(.separator),
-                                                          lineWidth: model.pageID == pageID ? 2.5 : 0.5))
-        .accessibilityLabel("Page \(number)")
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(selected ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
 }
 
-/// Thumbnails, redrawn only when a page changes.
+/// Thumbnails of the open notebook's pages, redrawn only when a page changes.
 @MainActor
 final class ThumbCache {
     static let shared = ThumbCache()

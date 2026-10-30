@@ -280,7 +280,11 @@ def merge(a, b):
         if pid in gone_p:
             continue
         pa, pb = a["pages"].get(pid), b["pages"].get(pid)
-        pages[pid] = _merge_page(pa, pb) if pa and pb else (pa or pb)
+        if pa and pb:
+            pages[pid] = _merge_page(pa, pb)
+        else:  # only one copy has it: still in stacking order, so merging is stable
+            only = pa or pb
+            pages[pid] = dict(only, strokes=sorted(only["strokes"], key=lambda s: (s["z"], s["id"])))
     out["pages"] = pages
     return finish(out)
 

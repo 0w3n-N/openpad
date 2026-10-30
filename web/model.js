@@ -98,7 +98,8 @@ export function merge(a, b) {
   for (const id of new Set([...Object.keys(a.pages), ...Object.keys(b.pages)])) {
     if (goneP.has(id)) continue;
     const pa = a.pages[id], pb = b.pages[id];
-    pages[id] = pa && pb ? mergePage(pa, pb) : pa || pb;
+    // Only one copy has it: still in stacking order, so merging is stable.
+    pages[id] = pa && pb ? mergePage(pa, pb) : { ...(pa || pb), strokes: [...(pa || pb).strokes].sort(byZ) };
   }
   return finish({
     v: 1, id: a.id, title: meta.title, size: meta.size, folder: meta.folder ?? '', metaT: meta.metaT,

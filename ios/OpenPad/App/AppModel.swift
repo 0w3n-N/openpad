@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import OpenPadCore
+import PencilKit
 import UIKit
 
 /// Extra running time after the app goes to the background.
@@ -21,14 +22,16 @@ struct Peers: Equatable {
     var guests = 0
 }
 
-/// The app's state: notebooks on this iPad, the connected computer, sync,
-/// and the live session that shows the open notebook on the computer (the
-/// same protocol as web/app.js).
+/// The app's state: notebooks on this iPad (offloaded ones as outlines), the
+/// connected computer, sync, search, and the live session that shows the open
+/// notebook on the computer (the same protocol as web/app.js).
 @MainActor
 @Observable
 final class AppModel {
     @ObservationIgnored let store = Store()
+    @ObservationIgnored let text = TextIndex(root: Store.defaultRoot)
     var library: [NotebookEntry] = []
+    var folders: [String] = []
     var link: ServerLink?
     var syncState: SyncState = .none
     var notebook: Notebook?  // the open notebook
@@ -39,6 +42,8 @@ final class AppModel {
     var liveWindow = "idle"  // desktop annotation: idle, picking, live
     var liveFrame: UIImage?
     var notice: String?
+    var downloading: Set<String> = []
+    var bytesUsed = 0
     var cast: Bool = UserDefaults.standard.object(forKey: "cast") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(cast, forKey: "cast")
@@ -52,6 +57,18 @@ final class AppModel {
             canvas?.applySettings()
         }
     }
+    /// Sync by itself whenever the computer is reachable (otherwise: Sync buttons only).
+    var autoSync: Bool = UserDefaults.standard.object(forKey: "autoSync") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoSync, forKey: "autoSync") }
+    }
+    /// Keep at most this much here (MB; 0: no limit). Beyond it, the least
+    /// recently opened notebooks the computer has are offloaded.
+    var storageLimitMB: Int = UserDefaults.standard.object(forKey: "storageLimitMB") as? Int ?? 5120 {
+        didSet {
+            UserDefaults.standard.set(storageLimitMB, forKey: "storageLimitMB")
+            enforceStorageLimit()
+        }
+    }
 
     @ObservationIgnored weak var canvas: PageCanvasController?
     @ObservationIgnored private var live: LiveSession?
@@ -61,14 +78,15 @@ final class AppModel {
     @ObservationIgnored private var noticeWork: DispatchWorkItem?
 
     init() {
-        library = store.library
         if let saved = store.link, let l = ServerLink(saved: saved) {
             link = l
         }
         #if DEBUG
         DemoLaunch.prepare(self)
         #endif
+        refreshLibrary()
         startLink()
+        enforceStorageLimit()
         #if DEBUG
         DemoLaunch.open(self)
         #endif
@@ -82,7 +100,11 @@ final class AppModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
-    func refreshLibrary() { library = store.library }
+    func refreshLibrary() {
+        library = store.library
+        folders = store.folders
+        bytesUsed = store.bytesUsed()
+    }
 
     // MARK: - the computer
 
@@ -93,6 +115,7 @@ final class AppModel {
         link = l
         store.link = l?.saved
         liveReady = false
+        socketConnected = false
         startLink()
         if l != nil, notebook != nil { castCurrent() }
     }
@@ -107,11 +130,12 @@ final class AppModel {
             Task { @MainActor in self?.store.link = l.saved }
         }
         let engine = SyncEngine(link: link, store: store)
-        engine.onState = { [weak self] s in
-            self?.syncState = s
-            if s == .ok { self?.refreshLibrary() }  // sync dots on the cards
-        }
+        engine.onState = { [weak self] s in self?.syncState = s }
         engine.onChanged = { [weak self] id, nb in self?.notebookChanged(id, nb) }
+        engine.onPassDone = { [weak self] in
+            self?.enforceStorageLimit()
+            self?.refreshLibrary()
+        }
         engine.isBusy = { [weak self] in self?.canvas?.drawingActive ?? false }
         sync = engine
         let session = LiveSession { [weak self] in
@@ -122,15 +146,13 @@ final class AppModel {
         session.onStatus = { [weak self] ok in self?.socketStatus(ok) }
         live = session
         session.start()
-        engine.run()
+        if autoSync { engine.run() }
         timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+            Task { @MainActor in
+                guard let self, self.autoSync else { return }
+                self.sync?.run()
+            }
         }
-    }
-
-    private func tick() {
-        guard let sync else { return }
-        sync.run()
     }
 
     func syncNow() {
@@ -140,8 +162,7 @@ final class AppModel {
     /// The app is going to the background: save, sync, and write readable PDFs.
     func backgrounded() {
         flushSave()
-        guard let sync else { return }
-        // Ask iPadOS for a little time to finish syncing.
+        guard let sync, autoSync else { return }
         let task = BackgroundTask()
         task.id = UIApplication.shared.beginBackgroundTask(withName: "sync") { task.end() }
         sync.run()
@@ -153,12 +174,16 @@ final class AppModel {
 
     private func notebookChanged(_ id: String, _ nb: Notebook?) {
         refreshLibrary()
-        guard let open = notebook, open.id == id else { return }
         guard let nb else {
-            close(deleted: true)
-            say("This notebook was deleted on another device.")
+            text.remove(notebook: id)
+            if notebook?.id == id {
+                close(deleted: true)
+                say("This notebook was deleted on another device.")
+            }
             return
         }
+        text.schedule(nb, store: store)
+        guard let open = notebook, open.id == id else { return }
         notebook = merge(open, nb)
         if let pageID, notebook?.pages[pageID] == nil { self.pageID = notebook?.order.first }
         canvasReload()
@@ -168,7 +193,7 @@ final class AppModel {
         socketConnected = ok
         liveReady = false
         if ok {
-            sync?.run()
+            if autoSync { sync?.run() }
             castCurrent()
         }
     }
@@ -197,6 +222,14 @@ final class AppModel {
         }
     }
 
+    /// A stroke still being drawn (PencilKit only hands over finished ones),
+    /// so the share window and guests see it as it's written.
+    func sendPreview(id: String, points: [[Double]], tool: PKTool, end: Bool) {
+        guard liveReady, cast, let pageID, let ink = tool as? PKInkingTool else { return }
+        live?.send(["t": "preview", "page": pageID, "id": id, "pts": points, "end": end,
+                    "tool": ink.inkType == .marker ? "hl" : "pen", "color": ink.color.hexString, "width": Double(ink.width)])
+    }
+
     // MARK: - live session messages
 
     private func handle(_ m: [String: Any]) {
@@ -208,6 +241,8 @@ final class AppModel {
             if let e = m["error"] as? String { say(e, seconds: 4) }
         case "live":
             liveMessage(m)
+        case "sync-request":
+            syncForComputer()
         case "state":
             readPeers(m)
             liveWindow = ((m["live"] as? [String: Any])?["state"] as? String) ?? "idle"
@@ -220,7 +255,7 @@ final class AppModel {
             liveReady = true
             let merged = merge(open, theirs)
             notebook = merged
-            if let page = m["page"] as? String, page != pageID, merged.pages[page] != nil { show(page) } else { canvasReload() }
+            if let page = m["page"] as? String, page != pageID, merged.pages[page] != nil { show(page, tell: false) } else { canvasReload() }
             saveSoon()
             if digest(merged) != digest(theirs), let sync { Task { try? await sync.push(merged) } }
         case "merge":
@@ -230,7 +265,7 @@ final class AppModel {
             saveSoon()
         case "goto":
             guard liveReady, let page = m["page"] as? String, notebook?.pages[page] != nil else { return }
-            show(page)
+            show(page, tell: false)
         case "end":
             // PencilKit can't show half a stroke, so strokes appear when they end.
             guard liveReady, let id = m["id"] as? String, let pageID else { return }
@@ -246,6 +281,24 @@ final class AppModel {
             }
         default:
             break
+        }
+    }
+
+    /// The Sync button on the computer: sync everything now and report back.
+    private func syncForComputer() {
+        guard let sync else { return }
+        flushSave()
+        say("Syncing with \(link?.displayName ?? "the computer")…", seconds: 30)
+        Task {
+            do {
+                let n = try await sync.syncAll()
+                live?.send(["t": "sync-done", "ok": true, "notebooks": n])
+                say("Synced \(n) notebook\(n == 1 ? "" : "s")")
+            } catch {
+                live?.send(["t": "sync-done", "ok": false, "notebooks": 0, "error": error.localizedDescription])
+                say("Sync failed: \(error.localizedDescription)", seconds: 5)
+            }
+            refreshLibrary()
         }
     }
 
@@ -322,25 +375,48 @@ final class AppModel {
     // MARK: - library
 
     @discardableResult
-    func createNotebook(title: String, size: PageSize) -> String {
-        let nb = newNotebook(title: title.isEmpty ? "Notes" : String(title.prefix(120)), size: size,
+    func createNotebook(title: String, size: PageSize, folder: String = "") -> String {
+        var nb = newNotebook(title: title.isEmpty ? "Notes" : String(title.prefix(120)), size: size,
                              section: "Notes", paper: size == .wide ? "grid" : "lines")
+        nb.folder = folder
         store.save(nb)
         refreshLibrary()
-        sync?.run()
+        if autoSync { sync?.run() }
         return nb.id
     }
 
-    func open(_ id: String) {
+    func open(_ id: String, page: String? = nil) {
+        guard let entry = store.index[id] else { return }
+        if entry.offloaded {
+            guard let sync, socketConnected || syncState == .ok else {
+                say("“\(entry.title)” is stored on \(link?.displayName ?? "your computer"). Connect to the same Wi-Fi to open it.", seconds: 5)
+                return
+            }
+            downloading.insert(id)
+            Task {
+                defer { downloading.remove(id) }
+                do {
+                    let nb = try await sync.download(id)
+                    refreshLibrary()
+                    text.schedule(nb, store: store)
+                    open(id, page: page)
+                } catch {
+                    say("Couldn’t download “\(entry.title)”: \(error.localizedDescription)", seconds: 5)
+                }
+            }
+            return
+        }
         guard let nb = store.load(id) else {
             refreshLibrary()
             return
         }
         notebook = nb
         liveReady = false
-        let last = UserDefaults.standard.string(forKey: "last.\(id)")
+        store.opened(id)
+        let last = page ?? UserDefaults.standard.string(forKey: "last.\(id)")
         pageID = last.flatMap { nb.pages[$0] != nil ? $0 : nil } ?? nb.order.first
         castCurrent()
+        text.schedule(nb, store: store)
     }
 
     func close(deleted: Bool = false) {
@@ -350,36 +426,136 @@ final class AppModel {
         pageID = nil
         liveReady = false
         refreshLibrary()
-        if let id, let sync, !deleted {
+        if let id, let sync, !deleted, autoSync {
             sync.run()
             sync.queuePDF(id, after: 1)
         }
+        enforceStorageLimit()
+    }
+
+    /// Change a closed notebook's title or folder.
+    private func editMeta(_ id: String, _ change: (inout Notebook) -> Void) {
+        if var nb = notebook, nb.id == id {
+            change(&nb)
+            nb.metaT = nowMS()
+            notebook = nb
+            send(["t": "merge", "nb": partial(nb, meta: true)])
+            flushSave()
+        } else if store.index[id]?.offloaded == true {
+            say("Open it first (it’s offloaded to the computer).")
+            return
+        } else if var nb = store.load(id) {
+            change(&nb)
+            nb.metaT = nowMS()
+            store.save(nb)
+        }
+        refreshLibrary()
+        if autoSync { sync?.run() }
     }
 
     func rename(_ id: String, to title: String) {
         let clean = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
         guard !clean.isEmpty else { return }
-        if var nb = notebook, nb.id == id {
-            nb.title = clean
-            nb.metaT = nowMS()
-            notebook = nb
-            send(["t": "merge", "nb": partial(nb, meta: true)])
-            saveSoon()
-            flushSave()
-        } else if var nb = store.load(id) {
-            nb.title = clean
-            nb.metaT = nowMS()
-            store.save(nb)
-        }
-        refreshLibrary()
-        sync?.run()
+        editMeta(id) { $0.title = clean }
+    }
+
+    func move(_ id: String, toFolder folder: String) {
+        editMeta(id) { $0.folder = folder }
     }
 
     func delete(_ id: String) {
         if notebook?.id == id { close(deleted: true) }
         store.delete(id)
+        text.remove(notebook: id)
         refreshLibrary()
-        sync?.run()
+        if autoSync { sync?.run() }
+    }
+
+    // MARK: - folders
+
+    /// Folder names as typed: up to four levels, separated by "/".
+    static func cleanFolder(_ s: String) -> String {
+        s.split(separator: "/").map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            .filter { !$0.isEmpty }.prefix(4).map { String($0.prefix(60)) }.joined(separator: "/")
+    }
+
+    func createFolder(_ name: String, in parent: String) {
+        let path = Self.cleanFolder(parent.isEmpty ? name : "\(parent)/\(name)")
+        guard !path.isEmpty else { return }
+        store.addFolder(path)
+        refreshLibrary()
+    }
+
+    func renameFolder(_ path: String, to name: String) {
+        let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+        let new = Self.cleanFolder(parent.isEmpty ? name : "\(parent)/\(name)")
+        guard !new.isEmpty, new != path else { return }
+        let moved = library.filter { $0.folder == path || $0.folder.hasPrefix(path + "/") }
+        if moved.contains(where: \.offloaded) {
+            say("Some notebooks in it are offloaded. Connect to your computer first.")
+            return
+        }
+        for e in moved { move(e.id, toFolder: new + e.folder.dropFirst(path.count)) }
+        store.removeFolder(path)
+        store.addFolder(new)
+        refreshLibrary()
+    }
+
+    func deleteFolder(_ path: String) -> Bool {
+        guard !library.contains(where: { $0.folder == path || $0.folder.hasPrefix(path + "/") }) else { return false }
+        store.removeFolder(path)
+        refreshLibrary()
+        return true
+    }
+
+    // MARK: - storage
+
+    /// Offload the least recently opened notebooks (that the computer has) until
+    /// OpenPad is under its storage limit, or there's room on the iPad again.
+    func enforceStorageLimit(force: Bool = false) {
+        var used = store.bytesUsed()
+        let limit = storageLimitMB > 0 ? storageLimitMB * 1_048_576 : Int.max
+        let lowDisk = (freeDiskBytes() ?? Int.max) < 1_073_741_824
+        guard force || used > limit || lowDisk else {
+            bytesUsed = used
+            return
+        }
+        let target = force ? 0 : (lowDisk ? used / 2 : Int(Double(limit) * 0.9))
+        let day: Int64 = 24 * 3600 * 1000
+        let candidates = store.library
+            .filter { !$0.offloaded && !$0.keep && $0.id != notebook?.id && (force || nowMS() - max($0.lastOpened, $0.modified) > day) }
+            .sorted { max($0.lastOpened, $0.modified) < max($1.lastOpened, $1.modified) }
+        var offloaded = 0
+        for e in candidates where used > target {
+            if store.offload(e.id) {
+                offloaded += 1
+                used = store.bytesUsed()
+            }
+        }
+        if offloaded > 0 { say("Offloaded \(offloaded) notebook\(offloaded == 1 ? "" : "s") to \(link?.displayName ?? "your computer") to save space.") }
+        refreshLibrary()
+    }
+
+    private func freeDiskBytes() -> Int? {
+        let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage.map { Int($0) }
+    }
+
+    func removeDownload(_ id: String) {
+        guard let e = store.index[id] else { return }
+        if store.offload(id) {
+            refreshLibrary()
+            say("“\(e.title)” is now only on \(link?.displayName ?? "your computer"). It downloads again when you open it.")
+        } else {
+            say(link == nil ? "Connect to your computer first: notebooks are only offloaded once it has them."
+                            : "Sync “\(e.title)” first: the computer doesn’t have its latest changes yet.", seconds: 4)
+            if autoSync { sync?.run() }
+        }
+    }
+
+    func setKeep(_ id: String, _ keep: Bool) {
+        store.update(id) { $0.keep = keep }
+        refreshLibrary()
     }
 
     // MARK: - editing
@@ -396,17 +572,19 @@ final class AppModel {
         saveWork = nil
         guard let nb = notebook else { return }
         store.save(nb)
+        store.refreshThumbnails(nb, limit: 4)
+        text.schedule(nb, store: store)
     }
 
     private func canvasReload() { canvas?.reloadFromModel() }
 
-    /// Show a page here (and on the computer).
-    func show(_ id: String?) {
+    /// Show a page here (and, unless it came from there, on the computer).
+    func show(_ id: String?, tell: Bool = true) {
         guard let id, notebook?.pages[id] != nil else { return }
         pageID = id
         if let nbID = notebook?.id { UserDefaults.standard.set(id, forKey: "last.\(nbID)") }
         if let model = canvas?.model { canvas?.show(pageID: id, refit: true, from: model) }
-        send(["t": "goto", "page": id])
+        if tell { send(["t": "goto", "page": id]) }
     }
 
     func go(_ delta: Int) {
@@ -448,22 +626,30 @@ final class AppModel {
         saveSoon()
     }
 
+    /// Insert pages after `after` (default: the current page), in its section.
+    private func insert(_ pages: [Page], after: String? = nil) {
+        guard let nb = notebook, !pages.isEmpty else { return }
+        let afterID = after ?? pageID
+        guard let sec = afterID.flatMap({ nb.section(of: $0) }) ?? nb.layout.sections.last else { return }
+        var placed = pages
+        for i in placed.indices { placed[i].sec = sec.id }
+        changeLayout({ secs in
+            guard let i = secs.firstIndex(where: { $0.id == sec.id }) else { return }
+            let at = afterID.flatMap { secs[i].pages.firstIndex(of: $0) }.map { $0 + 1 } ?? secs[i].pages.count
+            secs[i].pages.insert(contentsOf: placed.map(\.id), at: at)
+        }, pages: placed)
+        show(placed[0].id)
+    }
+
     func addPage(after: String? = nil) {
         guard let nb = notebook else { return }
-        let afterID = after ?? pageID
-        let cur = afterID.flatMap { nb.pages[$0] }
-        guard let sec = afterID.flatMap({ nb.section(of: $0) }) ?? nb.layout.sections.last else { return }
-        var page = blankPage(section: sec.id, size: nb.pageSize, paper: cur.map { $0.bg == nil ? $0.paper : "lines" } ?? "lines")
+        let cur = (after ?? pageID).flatMap { nb.pages[$0] }
+        var page = blankPage(section: "", size: nb.pageSize, paper: cur.map { $0.bg == nil ? $0.paper : "lines" } ?? "lines")
         if let cur, cur.bg == nil {
             page.h = cur.h
             page.pt = cur.pt
         }
-        changeLayout({ secs in
-            guard let i = secs.firstIndex(where: { $0.id == sec.id }) else { return }
-            let at = afterID.flatMap { secs[i].pages.firstIndex(of: $0) }.map { $0 + 1 } ?? secs[i].pages.count
-            secs[i].pages.insert(page.id, at: at)
-        }, pages: [page])
-        show(page.id)
+        insert([page], after: after)
     }
 
     func deletePage(_ id: String? = nil) {
@@ -481,6 +667,24 @@ final class AppModel {
             for k in secs.indices { secs[k].pages.removeAll { $0 == id } }
             if let i = secs.firstIndex(where: { $0.id == sec }) { secs[i].pages.append(id) }
         }, pages: [page])
+    }
+
+    func movePage(_ id: String, by delta: Int) {
+        changeLayout { secs in
+            guard let s = secs.firstIndex(where: { $0.pages.contains(id) }), let i = secs[s].pages.firstIndex(of: id),
+                  secs[s].pages.indices.contains(i + delta) else { return }
+            secs[s].pages.swapAt(i, i + delta)
+        }
+    }
+
+    func setPageTitle(_ id: String, _ title: String) {
+        guard var nb = notebook, var page = nb.pages[id] else { return }
+        page.title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+        page.t = nowMS()
+        nb.pages[id] = page
+        notebook = nb
+        send(["t": "merge", "nb": partial(nb, pages: [id])])
+        saveSoon()
     }
 
     func addSection(_ title: String) {
@@ -501,6 +705,12 @@ final class AppModel {
         guard !clean.isEmpty else { return }
         changeLayout { secs in
             if let i = secs.firstIndex(where: { $0.id == id }) { secs[i].title = clean }
+        }
+    }
+
+    func setSectionColor(_ id: String, _ color: String?) {
+        changeLayout { secs in
+            if let i = secs.firstIndex(where: { $0.id == id }) { secs[i].color = color }
         }
     }
 
@@ -529,56 +739,107 @@ final class AppModel {
         canvasReload()
     }
 
-    // MARK: - PDFs
+    // MARK: - PDFs, scans, photos
 
-    /// Import a PDF as a new notebook, or as a new section of the open one.
-    func importPDF(_ url: URL, asSection: Bool) {
+    private func readPDF(_ url: URL) -> (sha: String, sizes: [[Double]], name: String)? {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         guard let data = try? Data(contentsOf: url), data.count <= 200 * 1024 * 1024 else {
-            say("Couldn't read that file (PDFs up to 200 MB).")
-            return
+            say("Couldn't read \(url.lastPathComponent) (PDFs up to 200 MB).")
+            return nil
         }
         guard data.starts(with: Array("%PDF-".utf8)), let sizes = PDFAssets.pageSizes(data) else {
-            say("That file is not a PDF.")
-            return
+            say("\(url.lastPathComponent) is not a PDF.")
+            return nil
         }
-        let sha = store.putAsset(data)
-        let name = String(url.deletingPathExtension().lastPathComponent.prefix(80))
+        return (store.putAsset(data), sizes, String(url.deletingPathExtension().lastPathComponent.prefix(80)))
+    }
+
+    private func pdfPages(_ pdf: (sha: String, sizes: [[Double]], name: String), section: String) -> [Page] {
         let t = nowMS()
-        func pages(_ sec: String) -> [Page] {
-            sizes.enumerated().map { i, wh in
-                var p = blankPage(section: sec, size: .letter, paper: "blank", t: t)
-                p.h = (1000 * wh[1] / max(1, wh[0]) * 100).rounded() / 100
-                p.pt = wh
-                p.bg = Background(pdf: sha, n: i + 1)
-                return p
-            }
+        return pdf.sizes.enumerated().map { i, wh in
+            var p = blankPage(section: section, size: .letter, paper: "blank", t: t)
+            p.h = (1000 * wh[1] / max(1, wh[0]) * 100).rounded() / 100
+            p.pt = wh
+            p.bg = Background(pdf: pdf.sha, n: i + 1)
+            return p
         }
-        if asSection, notebook != nil {
+    }
+
+    /// PDFs into the library: one notebook, with a section per PDF (a OneNote
+    /// export, a semester of slides...).
+    func importPDFs(_ urls: [URL], folder: String = "") {
+        let pdfs = urls.compactMap(readPDF)
+        guard let first = pdfs.first else { return }
+        let t = nowMS()
+        var sections: [Section] = []
+        var pages: [String: Page] = [:]
+        for pdf in pdfs {
             let secID = newID()
-            let ps = pages(secID)
-            let cur = pageID.flatMap { notebook?.section(of: $0) }?.id
-            changeLayout({ secs in
-                let at = cur.flatMap { c in secs.firstIndex { $0.id == c } }.map { $0 + 1 } ?? secs.count
-                secs.insert(Section(id: secID, title: name, pages: ps.map(\.id)), at: at)
-            }, pages: ps)
-            flushSave()
-            if let first = ps.first { show(first.id) }
-            castCurrent()  // the computer needs the file before it can show the pages
-            say("Added \(name) (\(ps.count) pages)")
-        } else {
-            let secID = newID()
-            let ps = pages(secID)
-            let nb = finish(Notebook(id: newID(), title: name, size: PageSize.letter.rawValue, metaT: t, created: t,
-                                     layout: Layout(t: t, sections: [Section(id: secID, title: name, pages: ps.map(\.id))]),
-                                     pages: Dictionary(uniqueKeysWithValues: ps.map { ($0.id, $0) })))
-            store.save(nb)
-            refreshLibrary()
-            sync?.run()
-            open(nb.id)
-            say("Imported \(name) (\(ps.count) pages)")
+            let ps = pdfPages(pdf, section: secID)
+            sections.append(Section(id: secID, title: pdf.name, pages: ps.map(\.id)))
+            for p in ps { pages[p.id] = p }
         }
+        let nb = finish(Notebook(id: newID(), title: pdfs.count == 1 ? first.name : "Imported PDFs", size: PageSize.letter.rawValue,
+                                 folder: folder, metaT: t, created: t, layout: Layout(t: t, sections: sections), pages: pages))
+        store.save(nb)
+        refreshLibrary()
+        if autoSync { sync?.run() }
+        open(nb.id)
+        say("Imported \(pdfs.count == 1 ? first.name : "\(pdfs.count) PDFs") (\(pages.count) pages)")
+    }
+
+    /// A PDF as a new section of the open notebook, after the current one.
+    func importPDFAsSection(_ url: URL) {
+        guard notebook != nil, let pdf = readPDF(url) else { return }
+        let secID = newID()
+        let ps = pdfPages(pdf, section: secID)
+        let cur = pageID.flatMap { notebook?.section(of: $0) }?.id
+        changeLayout({ secs in
+            let at = cur.flatMap { c in secs.firstIndex { $0.id == c } }.map { $0 + 1 } ?? secs.count
+            secs.insert(Section(id: secID, title: pdf.name, pages: ps.map(\.id)), at: at)
+        }, pages: ps)
+        afterFilesAdded()
+        if let firstPage = ps.first { show(firstPage.id) }
+        say("Added \(pdf.name) (\(ps.count) pages)")
+    }
+
+    /// A PDF's pages inserted after the current page.
+    func insertPDFPages(_ url: URL) {
+        guard notebook != nil, let pdf = readPDF(url) else { return }
+        insert(pdfPages(pdf, section: ""))
+        afterFilesAdded()
+        say("Inserted \(pdf.sizes.count) page\(pdf.sizes.count == 1 ? "" : "s") from \(pdf.name)")
+    }
+
+    /// Scanned documents or photos, one page each, after the current page.
+    func insertImages(_ images: [UIImage]) {
+        guard notebook != nil else { return }
+        let t = nowMS()
+        let pages: [Page] = images.compactMap { image in
+            let maxSide: CGFloat = 2400
+            let k = min(1, maxSide / max(image.size.width, image.size.height))
+            let size = CGSize(width: image.size.width * k, height: image.size.height * k)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let flat = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+            guard let jpeg = flat.jpegData(compressionQuality: 0.82) else { return nil }
+            var p = blankPage(section: "", size: .letter, paper: "blank", t: t)
+            p.h = (1000 * size.height / max(1, size.width) * 100).rounded() / 100
+            let w = 612.0
+            p.pt = [w, (w * Double(size.height / max(1, size.width)) * 100).rounded() / 100]
+            p.bg = Background(img: store.putAsset(jpeg))
+            return p
+        }
+        insert(pages)
+        afterFilesAdded()
+        say("Added \(pages.count) page\(pages.count == 1 ? "" : "s")")
+    }
+
+    /// New files must reach the computer before it can show the pages.
+    private func afterFilesAdded() {
+        flushSave()
+        castCurrent()
     }
 
     /// A PDF of some pages, written to a temporary file for saving or sharing.
@@ -592,6 +853,19 @@ final class AppModel {
             }
         }
         let data = PDFExporter.render(pages: pages, title: title, store: store, liveFrame: liveFrame, outline: outline)
+        return writeTemp(data, title)
+    }
+
+    func exportNotebookPDF(_ id: String) -> URL? {
+        guard store.index[id]?.offloaded != true, let nb = store.load(id) else {
+            say("Open it first (it’s offloaded to the computer).")
+            return nil
+        }
+        let data = PDFExporter.render(pages: nb.order.compactMap { nb.pages[$0] }, title: nb.title, store: store, liveFrame: nil, outline: [])
+        return writeTemp(data, nb.title)
+    }
+
+    private func writeTemp(_ data: Data, _ title: String) -> URL? {
         let safe = title.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(safe.prefix(80)).pdf")
         do {
@@ -601,14 +875,5 @@ final class AppModel {
             say("Couldn't create the PDF.")
             return nil
         }
-    }
-
-    /// The notebook a library card shows, for exporting it without opening.
-    func exportNotebookPDF(_ id: String) -> URL? {
-        guard let nb = store.load(id) else { return nil }
-        let data = PDFExporter.render(pages: nb.order.compactMap { nb.pages[$0] }, title: nb.title, store: store,
-                                      liveFrame: nil, outline: [])
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(nb.title.replacingOccurrences(of: "/", with: "-").prefix(80)).pdf")
-        return (try? data.write(to: url, options: .atomic)) != nil ? url : nil
     }
 }

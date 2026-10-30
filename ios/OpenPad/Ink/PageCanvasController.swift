@@ -47,11 +47,11 @@ final class TiledPageView: UIView {
     }
 }
 
-/// Sees the Pencil's position while PencilKit draws (for the presenter's
-/// cursor on the computer), without taking any touches away from it.
+/// Sees the Pencil while PencilKit draws (for the cursor and live preview on
+/// the computer), without taking any touches away from it.
 final class PenObserver: UIGestureRecognizer {
-    var onMove: ((CGPoint) -> Void)?
-    var onEnd: (() -> Void)?
+    enum Phase { case began, moved, ended }
+    var onPencil: ((Phase, [CGPoint]) -> Void)?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
@@ -60,20 +60,21 @@ final class PenObserver: UIGestureRecognizer {
         delaysTouchesEnded = false
     }
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) { report(touches) }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) { report(touches) }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) { report(.began, touches, event) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) { report(.moved, touches, event) }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        onEnd?()
+        report(.ended, touches, event)
         state = .failed
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        onEnd?()
+        report(.ended, touches, event)
         state = .failed
     }
 
-    private func report(_ touches: Set<UITouch>) {
+    private func report(_ phase: Phase, _ touches: Set<UITouch>, _ event: UIEvent) {
         guard let t = touches.first(where: { $0.type == .pencil }), let view else { return }
-        onMove?(t.location(in: view))
+        let all = event.coalescedTouches(for: t) ?? [t]
+        onPencil?(phase, all.map { $0.location(in: view) })
     }
 }
 
@@ -139,8 +140,7 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
 
         let observer = PenObserver(target: nil, action: nil)
         observer.delegate = self
-        observer.onMove = { [weak self] p in self?.cursor(at: p) }
-        observer.onEnd = { [weak self] in self?.model?.sendCursor(nil) }
+        observer.onPencil = { [weak self] phase, points in self?.pencil(phase, points) }
         canvas.addGestureRecognizer(observer)
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
         canvas.addGestureRecognizer(hover)
@@ -335,7 +335,42 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
         }
     }
 
-    // MARK: cursor
+    // MARK: cursor and live preview
+
+    private var previewID: String?
+    private var previewPending: [[Double]] = []
+    private var previewSent: TimeInterval = 0
+
+    private func pencil(_ phase: PenObserver.Phase, _ points: [CGPoint]) {
+        guard let last = points.last else { return }
+        let z = max(0.01, canvas.zoomScale)
+        let pageXY = points.map { [(Double($0.x / z) * 100).rounded() / 100, (Double($0.y / z) * 100).rounded() / 100, 0.5] }
+        let inking = canvas.tool is PKInkingTool  // not the eraser or lasso
+        switch phase {
+        case .began:
+            cursor(at: last)
+            previewID = inking ? newID() : nil
+            previewPending = pageXY
+            previewSent = 0
+        case .moved:
+            cursor(at: last)
+            guard let id = previewID else { return }
+            previewPending += pageXY
+            let t = CACurrentMediaTime()
+            if t - previewSent > 1 / 30 {
+                previewSent = t
+                model?.sendPreview(id: id, points: previewPending, tool: canvas.tool, end: false)
+                previewPending = []
+            }
+        case .ended:
+            if let id = previewID {
+                model?.sendPreview(id: id, points: previewPending + pageXY, tool: canvas.tool, end: true)
+            }
+            previewID = nil
+            previewPending = []
+            model?.sendCursor(nil)
+        }
+    }
 
     private func cursor(at point: CGPoint) {
         let t = CACurrentMediaTime()

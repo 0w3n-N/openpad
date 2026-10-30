@@ -1,4 +1,5 @@
 import OpenPadCore
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -22,6 +23,11 @@ struct EditorView: View {
     @Environment(AppModel.self) private var model
     @State private var sidebar = false
     @State private var importing = false
+    @State private var importAsSection = false
+    @State private var scanning = false
+    @State private var pickingPhotos = false
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var titling = false
     @State private var showInvite = false
     @State private var showSettings = false
     @State private var exporting: PDFFile?
@@ -47,7 +53,29 @@ struct EditorView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: sidebar)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf]) { result in
-            if case let .success(url) = result { model.importPDF(url, asSection: true) }
+            guard case let .success(url) = result else { return }
+            if importAsSection { model.importPDFAsSection(url) } else { model.insertPDFPages(url) }
+        }
+        .fullScreenCover(isPresented: $scanning) {
+            DocumentScanner { images in
+                scanning = false
+                if !images.isEmpty { model.insertImages(images) }
+            }
+            .ignoresSafeArea()
+        }
+        .photosPicker(isPresented: $pickingPhotos, selection: $photos, maxSelectionCount: 30, matching: .images)
+        .onChange(of: photos) { _, items in
+            guard !items.isEmpty else { return }
+            Task {
+                let images = await loadImages(items)
+                photos = []
+                if !images.isEmpty { model.insertImages(images) }
+            }
+        }
+        .alert("Page title", isPresented: $titling) {
+            TextField("e.g. Lecture 4: Laplace transforms", text: $renameText)
+            Button("Save") { if let id = model.pageID { model.setPageTitle(id, renameText) } }
+            Button("Cancel", role: .cancel) {}
         }
         .fileExporter(isPresented: Binding(get: { exporting != nil }, set: { if !$0 { exporting = nil } }),
                       document: exporting, contentType: .pdf, defaultFilename: exporting?.name ?? "OpenPad") { result in
@@ -74,10 +102,21 @@ struct EditorView: View {
                 .accessibilityLabel("Notebooks")
             Button { sidebar.toggle() } label: { Image(systemName: "sidebar.left").frame(width: 38, height: 38) }
                 .accessibilityLabel("Sections and pages")
-            Text(model.notebook?.title ?? "")
-                .font(.headline)
-                .lineLimit(1)
-                .padding(.leading, 6)
+            Button {
+                renameText = pageTitle
+                titling = true
+            } label: {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(model.notebook?.title ?? "").font(.headline).lineLimit(1)
+                    Text(pageTitle.isEmpty ? "Add a page title" : pageTitle)
+                        .font(.caption)
+                        .foregroundStyle(pageTitle.isEmpty ? .tertiary : .secondary)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 6)
+            .accessibilityLabel("Page title")
             Spacer(minLength: 8)
             Button { model.canvas?.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 38, height: 38) }
                 .accessibilityLabel("Undo")
@@ -95,8 +134,7 @@ struct EditorView: View {
             Button { model.go(1) } label: { Image(systemName: "chevron.down").frame(width: 34, height: 38) }
                 .disabled(position.index >= position.count - 1)
                 .accessibilityLabel("Next page")
-            Button { model.addPage() } label: { Image(systemName: "plus.rectangle.on.rectangle").frame(width: 38, height: 38) }
-                .accessibilityLabel("New page after this one")
+            insertMenu
             paperMenu
             liveBadge
             moreMenu
@@ -104,6 +142,33 @@ struct EditorView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    private var pageTitle: String {
+        model.pageID.flatMap { model.notebook?.pages[$0]?.title } ?? ""
+    }
+
+    private var insertMenu: some View {
+        Menu {
+            Button("Blank page after this", systemImage: "doc") { model.addPage() }
+            Button("PDF pages after this…", systemImage: "doc.on.doc") {
+                importAsSection = false
+                importing = true
+            }
+            Button("PDF as a new section…", systemImage: "doc.badge.plus") {
+                importAsSection = true
+                importing = true
+            }
+            if DocumentScanner.isAvailable {
+                Button("Scan documents…", systemImage: "doc.viewfinder") { scanning = true }
+            }
+            Button("Photos…", systemImage: "photo.on.rectangle") { pickingPhotos = true }
+        } label: {
+            Image(systemName: "plus.rectangle.on.rectangle").frame(width: 38, height: 38)
+        } primaryAction: {
+            model.addPage()
+        }
+        .accessibilityLabel("New page (hold for more)")
     }
 
     private var position: (index: Int, count: Int, label: String) {
@@ -159,7 +224,6 @@ struct EditorView: View {
 
     private var moreMenu: some View {
         Menu {
-            Button("Import PDF as a new section…", systemImage: "doc.badge.plus") { importing = true }
             Menu("Save as PDF…") {
                 Button("This page") { export(.page) }
                 Button("This section") { export(.section) }

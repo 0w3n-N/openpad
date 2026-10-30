@@ -72,8 +72,10 @@ public func merge(_ a: Notebook, _ b: Notebook) -> Notebook {
     for id in Set(a.pages.keys).union(b.pages.keys) where !goneP.contains(id) {
         switch (a.pages[id], b.pages[id]) {
         case let (pa?, pb?): pages[id] = mergePage(pa, pb)
-        case let (pa?, nil): pages[id] = pa
-        case let (nil, pb?): pages[id] = pb
+        case let (pa?, nil), let (nil, pa?):
+            var only = pa  // still in stacking order, so merging is stable
+            only.strokes.sort(by: byZ)
+            pages[id] = only
         default: break
         }
     }

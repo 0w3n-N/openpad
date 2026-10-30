@@ -81,39 +81,76 @@ jobs:
           grep -q "BUILD SUCCEEDED" build.log
       - name: Run it against a real OpenPad server
         run: |
+          set -e
           export XDG_DATA_HOME="$RUNNER_TEMP/opdata" XDG_RUNTIME_DIR="$RUNNER_TEMP/oprun" OPENPAD_NOTES="$RUNNER_TEMP/opnotes"
           mkdir -p "$XDG_RUNTIME_DIR" shots
           python3 -B bin/openpad serve --port 8770 --bind 127.0.0.1 --quiet > server.log 2>&1 &
           sleep 3
           KEY=$(cat "$XDG_DATA_HOME/openpad/token")
+          API="http://127.0.0.1:8770"
+          APP=io.github.0w3n-n.openpad
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" ios/build/Build/Products/Debug-iphonesimulator/OpenPad.app
-          xcrun simctl launch "$UDID" io.github.0w3n-n.openpad -openpadDemo YES -openpadServer http://127.0.0.1:8770 -openpadKey "$KEY"
-          sleep 15
+          DATA="$(xcrun simctl get_app_container "$UDID" "$APP" data)/Library/Application Support/OpenPad"
+
+          echo "== 1. the library syncs to the computer, into its folder"
+          xcrun simctl launch "$UDID" "$APP" -openpadDemo YES -openpadServer "$API" -openpadKey "$KEY"
+          sleep 16
           xcrun simctl io "$UDID" screenshot shots/1-library.png
-          # The app synced its notebook to the computer.
-          curl -s "http://127.0.0.1:8770/api/sync?k=$KEY" > sync.json
-          python3 -c 'import json; d = json.load(open("sync.json")); t = [n["title"] for n in d["notebooks"]]; print(t); assert "Demo notebook" in t, t'
-          xcrun simctl terminate "$UDID" io.github.0w3n-n.openpad
-          xcrun simctl launch "$UDID" io.github.0w3n-n.openpad -openpadOpen YES
-          sleep 12
+          DEMO=$(curl -s "$API/api/sync?k=$KEY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(n["id"] for n in d["notebooks"] if n["title"] == "Demo notebook"))')
+          test -f "$OPENPAD_NOTES/2025 Fall/ECE 210/Demo notebook/.openpad/notebook.json"
+          xcrun simctl terminate "$UDID" "$APP"
+
+          echo "== 2. live: the iPad's strokes reach the computer, guests' strokes reach the iPad"
+          xcrun simctl launch "$UDID" "$APP" -openpadOpen YES -openpadDrawTest YES
+          sleep 14
           xcrun simctl io "$UDID" screenshot shots/2-editor.png
-          # Opening it put it on the computer's screen (the live session).
-          curl -s "http://127.0.0.1:8770/api/sync?k=$KEY" > sync2.json
-          python3 -c '
-          import json
-          d = json.load(open("sync2.json"))
-          demo = next(n["id"] for n in d["notebooks"] if n["title"] == "Demo notebook")
-          print("live:", d["live"], "demo:", demo)
-          assert d["live"] == demo, "the app did not put its notebook on screen"
-          '
-          # The readable PDFs are written when the app goes to the background.
-          xcrun simctl launch "$UDID" com.apple.Preferences
-          sleep 10
+          curl -s "$API/api/sync?k=$KEY" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["live"] == sys.argv[1], d["live"]' "$DEMO"
+          curl -s "$API/api/sync/nb/$DEMO?k=$KEY" | grep -q cistroke01
+          GUEST=$(curl -s "$API/api/info?k=$KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["guests"]["w"].split("#w=")[1])')
+          python3 ios/ci/guest_stroke.py 8770 "$GUEST" guestci1
+          sleep 4
+          xcrun simctl io "$UDID" screenshot shots/3-guest-stroke.png
+
+          echo "== 3. the computer's Sync button"
+          curl -s -X POST "$API/api/sync/request?k=$KEY"; echo
+          for i in $(seq 1 60); do
+            if curl -s "$API/api/info?k=$KEY" | python3 -c 'import json,sys; l=json.load(sys.stdin).get("lastSync") or {}; sys.exit(0 if l.get("ok") else 1)'; then break; fi
+            sleep 1
+          done
+          curl -s "$API/api/info?k=$KEY" | python3 -c 'import json,sys; l=json.load(sys.stdin)["lastSync"]; print(l); assert l["ok"] and l["notebooks"] >= 1'
+          grep -q guestci1 "$DATA/notebooks/$DEMO.json"
           find "$OPENPAD_NOTES" -name "*.pdf" | tee pdfs.txt
-          test -s pdfs.txt
-          cp "$(head -1 pdfs.txt)" shots/3-section.pdf
+          test -f "$OPENPAD_NOTES/2025 Fall/ECE 210/Demo notebook/Kinematics.pdf"
+          cp "$OPENPAD_NOTES/2025 Fall/ECE 210/Demo notebook/Kinematics.pdf" shots/4-kinematics.pdf
+          xcrun simctl terminate "$UDID" "$APP"
+
+          echo "== 4. offloading keeps the outline; opening downloads it again"
+          xcrun simctl launch "$UDID" "$APP" -openpadOffloadAll YES
+          sleep 15
+          xcrun simctl io "$UDID" screenshot shots/5-offloaded.png
+          python3 - "$DATA" "$DEMO" <<'PY'
+          import json, sys
+          data, demo = sys.argv[1], sys.argv[2]
+          e = next(x for x in json.load(open(f"{data}/index.json")) if x["id"] == demo)
+          nb = json.load(open(f"{data}/notebooks/{demo}.json"))
+          print("offloaded:", e["offloaded"], "strokes:", sum(len(p["strokes"]) for p in nb["pages"].values()))
+          assert e["offloaded"] and all(not p["strokes"] for p in nb["pages"].values())
+          assert all(p.get("title") is not None for p in nb["pages"].values()) and nb["layout"]["sections"]
+          PY
+          xcrun simctl terminate "$UDID" "$APP"
+          xcrun simctl launch "$UDID" "$APP" -openpadOpen YES
+          sleep 14
+          xcrun simctl io "$UDID" screenshot shots/6-downloaded.png
+          python3 - "$DATA" "$DEMO" <<'PY'
+          import json, sys
+          data, demo = sys.argv[1], sys.argv[2]
+          e = next(x for x in json.load(open(f"{data}/index.json")) if x["id"] == demo)
+          ink = open(f"{data}/notebooks/{demo}.json").read()
+          print("offloaded:", e["offloaded"])
+          assert not e["offloaded"] and "cistroke01" in ink and "guestci1" in ink
+          PY
       - name: Keep screenshots and logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
