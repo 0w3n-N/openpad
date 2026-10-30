@@ -165,8 +165,10 @@ offers:
 - PDF, scan and photo pages
 - offloading old notebooks to the computer when the iPad fills up
 
-It installs from Xcode on a Mac, or by sideloading the unsigned build each CI
-run produces (see its README). The instructions below also cover the web app,
+Each version is a [GitHub release](https://github.com/0w3n-N/openpad/releases)
+that installs with SideStore, no Mac needed, and updates from SideStore after
+that (see [its README](ios/README.md#sideloading-with-sidestore)). It also
+builds from Xcode on a Mac. The instructions below also cover the web app,
 which runs in Safari with nothing to install.
 
 ### Start it and connect the iPad
@@ -410,7 +412,9 @@ and what isn't.
 - `python3 -B tests/smoke.py` runs on Linux, macOS and Windows: it starts the
   real server through the CLI, pairs, connects and stops it.
 - GitHub Actions runs both, and publishes `web/` to GitHub Pages for the
-  installed app (`.github/workflows/`).
+  installed app (`.github/workflows/`). `ios.yml` tests the iPad app in a
+  simulator and, when the version is new, publishes the release (see
+  [CHANGELOG.md](CHANGELOG.md)).
 - `python3 assets/build-icons.py` regenerates the icons. It needs Inkscape.
 - Layout:
   - `openpad/`: server, notebook merge rules, store, TLS, tunnel, CLI, QR

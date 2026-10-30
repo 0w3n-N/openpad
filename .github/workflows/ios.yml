@@ -3,7 +3,9 @@ name: ios
 # The native iPad app (ios/). Every push: test the shared core on Linux and
 # macOS, build the app, run it in an iPad simulator against a real OpenPad
 # server (checking it syncs and goes live), and keep screenshots plus an
-# unsigned .ipa (for sideloading) as artifacts.
+# unsigned .ipa (for sideloading) as artifacts. On main, when the version is
+# new, publish a GitHub release with the .ipa and a SideStore source
+# (ios/ci/make_source.py), so SideStore offers the update.
 
 on:
   push:
@@ -170,3 +172,33 @@ jobs:
         with:
           name: OpenPad-unsigned-ipa
           path: ios/OpenPad-unsigned.ipa
+
+  release:
+    name: Release (when the version is new)
+    needs: [core, app]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: OpenPad-unsigned-ipa
+          path: dist
+      - name: Publish the iPad app and its SideStore source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mv dist/OpenPad-unsigned.ipa dist/OpenPad.ipa
+          TAG=$(python3 -B ios/ci/make_source.py dist/OpenPad.ipa dist)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG is already released. To release again, raise the version and add it to CHANGELOG.md."
+            exit 0
+          fi
+          gh release create "$TAG" dist/OpenPad.ipa dist/openpad-source.json \
+            --target "$GITHUB_SHA" --title "OpenPad ${TAG#v}" --notes-file dist/notes.md --latest

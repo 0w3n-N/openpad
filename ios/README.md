@@ -54,6 +54,48 @@ you can write on, and the whole set becomes one notebook.
 
 ## Getting it onto your iPad
 
+Each OpenPad version is a [GitHub release](https://github.com/0w3n-N/openpad/releases)
+with the app as `OpenPad.ipa`. It's unsigned: SideStore signs it with your
+Apple ID when it installs it. You need iPadOS 17 or newer.
+
+### Sideloading with SideStore
+
+SideStore is installed once from a computer (Linux, macOS or Windows) with
+[iloader](https://github.com/nab138/iloader). After that it installs, updates
+and re-signs apps on the iPad itself.
+
+With a free Apple ID, apps stay signed for 7 days (SideStore renews them) and
+only 3 sideloaded apps, SideStore included, can be installed at a time. A paid
+Apple Developer account makes it a year, with no 3-app limit.
+
+1. **On the iPad:** install **LocalDevVPN** from the App Store, open it, tap
+   **Connect** and allow the VPN configuration. SideStore needs it on, with the
+   iPad on Wi-Fi, whenever it installs or refreshes an app.
+2. **On the computer:** install `usbmuxd` (Arch: `sudo pacman -S usbmuxd`) and
+   iloader from [its releases](https://github.com/nab138/iloader/releases)
+   (Linux: `iloader-linux-amd64.AppImage`, then `chmod +x` it). Plug in the
+   iPad and tap **Trust** on it. In iloader, sign in with your Apple ID,
+   select the iPad and choose **Install SideStore (Stable)**.
+3. **On the iPad:**
+   1. Settings › General › VPN & Device Management › your Apple ID ›
+      **Trust** (on recent iPadOS versions it reads **Allow & Restart**).
+   2. Settings › Privacy & Security › turn on **Developer Mode**. The iPad
+      restarts.
+   3. With LocalDevVPN connected, open SideStore and sign in with the same
+      Apple ID. In **My Apps**, tap **7 DAYS** next to SideStore once.
+4. **Add OpenPad's source** in SideStore (Sources › **+**):
+
+   ```
+   https://github.com/0w3n-N/openpad/releases/latest/download/openpad-source.json
+   ```
+
+   Then install OpenPad from it. New versions show up there as updates.
+
+Updating keeps your notebooks. Deleting the app deletes the notebooks stored on
+the iPad, so press **Sync** first if you ever do. If OpenPad expires (with a
+free Apple ID, after 7 days without a refresh), it won't open until SideStore
+refreshes it, but nothing is lost.
+
 ### With a Mac
 
 ```bash
@@ -63,13 +105,6 @@ cd ios && xcodegen generate && open OpenPad.xcodeproj
 
 Select your team under Signing & Capabilities, plug in the iPad, and Run.
 With a free Apple ID the app has to be reinstalled every 7 days.
-
-### Sideloading (AltStore, SideStore)
-
-Every CI run keeps an unsigned build: Actions › ios › the latest run ›
-Artifacts › **OpenPad-unsigned-ipa**. AltStore or SideStore sign it with
-your Apple ID when installing. With a free Apple ID, apps are re-signed
-every 7 days.
 
 ## Using it
 
@@ -89,7 +124,11 @@ every 7 days.
   - the Sync button works and produces readable PDFs
   - offloading keeps the outline, and opening downloads everything again
 
-  It keeps the screenshots.
+  It keeps the screenshots and an unsigned build. On main, when the version
+  is new, it also publishes the GitHub release with `OpenPad.ipa` and the
+  SideStore source (`ci/make_source.py`; what's new comes from
+  `CHANGELOG.md`). To release, raise the version in `openpad/__init__.py`,
+  `manifest.json` and `project.yml`, and add it to `CHANGELOG.md`.
 - Debug builds accept launch arguments for that test: `-openpadDemo YES`,
   `-openpadServer http://127.0.0.1:8770 -openpadKey <key>`, and
   `-openpadOpen YES`, `-openpadDrawTest YES`, `-openpadOffloadAll YES` (see

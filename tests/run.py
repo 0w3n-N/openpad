@@ -11,8 +11,10 @@ merge rules are checked against web/model.js when Node is installed.
 
 import base64
 import copy
+import datetime
 import hashlib
 import json
+import plistlib
 import random
 import re
 import ssl
@@ -26,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 
 sys.dont_write_bytecode = True
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1098,6 +1101,58 @@ check("files 0700", mode(os.path.join(DATA, "assets")) == 0o700)
 check("certificates 0700", mode(os.path.join(DATA, "tls")) == 0o700)
 check("runtime dir 0700", mode(RUN) == 0o700)
 check("status 0600", mode(os.path.join(RUN, "status.json")) == 0o600)
+
+# --------------------------------------------------------------------------- releases
+
+print("== releases (the iPad app, for SideStore)")
+sys.path.insert(0, os.path.join(ROOT, "ios", "ci"))
+import make_source  # noqa: E402
+
+versions = make_source.versions()
+version = versions["manifest.json"]
+check("the plugin, the server and the iPad app have one version", len(set(versions.values())) == 1, versions)
+check("CHANGELOG.md says what's new in it", make_source.changes(version))
+
+
+def fake_ipa(name, version):
+    info = {"CFBundleShortVersionString": version, "CFBundleVersion": "7", "CFBundleIdentifier": "io.github.0w3n-n.openpad",
+            "CFBundleDisplayName": "OpenPad", "CFBundleName": "OpenPad", "MinimumOSVersion": "17.0",
+            "NSCameraUsageDescription": "camera", "NSLocalNetworkUsageDescription": "network", "UIFileSharingEnabled": False}
+    path = os.path.join(TMP, name)
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Payload/OpenPad.app/Info.plist", plistlib.dumps(info))
+        z.writestr("Payload/OpenPad.app/OpenPad", os.urandom(1000))
+    return path
+
+
+ipa = fake_ipa("OpenPad.ipa", version)
+raw = open(ipa, "rb").read()
+tag, source, notes = make_source.build(ipa, now=datetime.datetime(2026, 10, 29, 12, 0, tzinfo=datetime.timezone.utc))
+app = source["apps"][0]
+rel = app["versions"][0]
+check("the release is tagged with the version", tag == "v" + version)
+check("SideStore can check the download's size and SHA-256",
+      rel["size"] == app["size"] == len(raw) and rel["sha256"] == hashlib.sha256(raw).hexdigest())
+check("version, build and minimum iPadOS come from the build itself",
+      rel["version"] == app["version"] == version and rel["buildVersion"] == "7" and rel["minOSVersion"] == "17.0")
+check("every permission prompt is declared, and nothing else", app["appPermissions"] == {
+    "entitlements": [], "privacy": {"NSCameraUsageDescription": "camera", "NSLocalNetworkUsageDescription": "network"}})
+check("the download is this release's OpenPad.ipa",
+      rel["downloadURL"] == app["downloadURL"] and rel["downloadURL"].endswith(f"/releases/download/{tag}/OpenPad.ipa"))
+check("dates are ISO 8601 with a time zone", rel["date"] == app["versionDate"] == "2026-10-29T12:00:00Z")
+check("no marketplace ID (SideStore would take it for a notarized app)", "marketplaceID" not in app)
+check("the source is version 2 (SideStore checks permissions) and plain JSON",
+      source["version"] == 2 and json.loads(json.dumps(source)) == source)
+check("the release notes give the source's address", make_source.SOURCE_URL in notes and source["sourceURL"] == make_source.SOURCE_URL)
+check("what's new has no hard line breaks",
+      make_source.unwrap("One\ntwo.\n\n- a\n  b\n- c\n\n```\nkeep\n  this\n```") == "One two.\n\n- a b\n- c\n\n```\nkeep\n  this\n```"
+      and rel["localizedDescription"] == make_source.unwrap(make_source.changes(version)))
+try:
+    make_source.build(fake_ipa("old.ipa", "0.0.1"))
+    refused = ""
+except ValueError as e:
+    refused = str(e)
+check("a build with another version is refused", "0.0.1" in refused, refused)
 
 srv.shutdown()
 srv.server_close()
