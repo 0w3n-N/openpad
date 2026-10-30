@@ -22,9 +22,10 @@ what the plugin does on your system.
   your network as Private. Python and cloudflared come from winget.
   `scripts\uninstall.ps1` removes the rule, the shortcut and the PATH entry.
 - No code is downloaded at runtime. There are no pip packages or bundled
-  binaries. `web/vendor/pdfjs` is Mozilla's pdf.js 4.10.38, copied unmodified
-  from npm (its hash is in `web/vendor/pdfjs/README.md`). It runs in the
-  browser with `isEvalSupported: false`.
+  binaries. `web/node_modules/` holds two npm packages, copied unmodified and
+  checked in (nothing is installed): Mozilla's pdf.js 4.10.38 (`pdfjs-dist`)
+  and jsQR 1.4.0. Each folder's README records the package's npm integrity
+  hash. pdf.js runs in the browser with `isEvalSupported: false`.
 - Data (notebooks, PDFs and images they show, pairing key, guest links, the
   certificate authority) is stored in `~/.local/share/openpad/` (Linux) or
   `~/Library/Application Support/openpad/` (macOS), with directories at mode

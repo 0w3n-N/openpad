@@ -408,9 +408,22 @@ check("nosniff, no-referrer, no framing",
       and h.get("x-frame-options") == "DENY")
 pages_html = [http("GET", p)[2] for p in ("/", "/view", "/join", "/setup")]
 check("no inline scripts or styles (CSP-clean)", all(b"style=" not in x and b"<script>" not in x for x in pages_html))
-check("pdf.js is served", http("GET", "/vendor/pdfjs/pdf.min.mjs")[0] == 200)
+check("pdf.js is served", http("GET", "/node_modules/pdfjs-dist/pdf.min.mjs")[0] == 200)
+# The bundled npm files are exactly the published ones (sha256 of each file
+# from pdfjs-dist@4.10.38 and jsqr@1.4.0; their READMEs give the package hashes).
+NPM_FILES = {
+    "pdfjs-dist/pdf.min.mjs": "44ec6f011027ee77791386b66c14876a5fc29e20bf0433c07c6726fff7212b72",
+    "pdfjs-dist/pdf.worker.min.mjs": "bd88805178a26c729db8c0107a5b630cb900ec070f4d8c7529a3e45530afd41d",
+    "jsqr/jsqr.js": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+}
+bundled = {os.path.relpath(os.path.join(d, f), os.path.join(ROOT, "web", "node_modules")).replace(os.sep, "/")
+           for d, _, fs in os.walk(os.path.join(ROOT, "web", "node_modules")) for f in fs
+           if not f.endswith((".md", "LICENSE"))}
+check("web/node_modules holds only the two npm packages' files", bundled == set(NPM_FILES), bundled)
+check("and they're unmodified", all(hashlib.sha256(open(os.path.join(ROOT, "web", "node_modules", f), "rb").read()).hexdigest() == h
+                                    for f, h in NPM_FILES.items()))
 for p in ("/../openpad/server.py", "/%2e%2e/openpad/server.py", "/web/../openpad/server.py", "//etc/passwd",
-          "/app.html", "/server.py", "/vendor/pdfjs/LICENSE", "/vendor/pdfjs/README.md"):
+          "/app.html", "/server.py", "/node_modules/pdfjs-dist/LICENSE", "/node_modules/pdfjs-dist/README.md"):
     check(f"no file outside the allowlist: {p}", http("GET", p)[0] in (403, 404))
 check("server header doesn't reveal Python", "python" not in http("GET", "/api/ping")[1].get("server", "").lower())
 
@@ -980,7 +993,7 @@ if shutil.which("node"):
           "for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const v = rows[(y / k) | 0][(x / k) | 0] === '1' ? 0 : 255;"
           "const i = (y * n + x) * 4; data[i] = data[i + 1] = data[i + 2] = v; data[i + 3] = 255; }"
           "const r = jsQR(data, n, n); console.log(r ? r.data : '');")
-    r = subprocess.run(["node", "-e", js, os.path.join(ROOT, "web", "vendor", "jsqr", "jsqr.js")],
+    r = subprocess.run(["node", "-e", js, os.path.join(ROOT, "web", "node_modules", "jsqr", "jsqr.js")],
                        input=json.dumps(rows), capture_output=True, text=True, timeout=60)
     check("the app's QR reader decodes the computer's QR code", r.stdout.strip() == url, r.stdout[-200:] + r.stderr[-300:])
 else:

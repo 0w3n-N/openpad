@@ -421,7 +421,8 @@ and what isn't.
   - `openpad/`: server, notebook merge rules, store, TLS, tunnel, CLI, QR
     encoder, window capture, theme.
   - `web/`: the notes app, share window, guest page and setup page.
-    `web/vendor/pdfjs` is Mozilla's pdf.js (Apache 2.0), unmodified.
+    `web/node_modules/` holds two unmodified npm packages, checked in: Mozilla's
+    pdf.js (Apache 2.0) and jsQR (Apache 2.0).
   - `Panel.qml`, `OpenPadIcon.qml`, `Model.js`: the Omarchy bar widget.
   - `scripts/`: setup and uninstall for Linux/macOS (bash) and Windows
     (PowerShell).

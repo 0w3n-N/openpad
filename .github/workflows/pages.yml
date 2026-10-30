@@ -30,13 +30,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Collect the app's files
         run: |
-          mkdir -p _site/vendor/pdfjs
+          mkdir -p _site/node_modules/pdfjs-dist
           cp web/app.html _site/index.html
-          mkdir -p _site/vendor/jsqr
+          mkdir -p _site/node_modules/jsqr
           cp web/app.html web/app.js web/editor.js web/ink.js web/link.js web/model.js web/scan.js web/store.js \
              web/ui.js web/style.css web/sw.js web/manifest.webmanifest web/icon.svg web/icon.png _site/
-          cp web/vendor/pdfjs/pdf.min.mjs web/vendor/pdfjs/pdf.worker.min.mjs web/vendor/pdfjs/LICENSE _site/vendor/pdfjs/
-          cp web/vendor/jsqr/jsqr.js web/vendor/jsqr/LICENSE _site/vendor/jsqr/
+          cp web/node_modules/pdfjs-dist/pdf.min.mjs web/node_modules/pdfjs-dist/pdf.worker.min.mjs web/node_modules/pdfjs-dist/LICENSE _site/node_modules/pdfjs-dist/
+          cp web/node_modules/jsqr/jsqr.js web/node_modules/jsqr/LICENSE _site/node_modules/jsqr/
           # A new cache version per deploy: the app updates all its files at once.
           sed -i "s/const VERSION = 'openpad-dev';/const VERSION = 'openpad-${GITHUB_SHA::12}';/" _site/sw.js
           grep -q "openpad-${GITHUB_SHA::12}" _site/sw.js

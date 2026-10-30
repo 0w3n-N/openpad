@@ -159,8 +159,8 @@ export function drawPaper(ctx, page, k) {
 
 let pdfjsReady = null;
 function pdfjs() {
-  pdfjsReady ??= import(new URL('./vendor/pdfjs/pdf.min.mjs', import.meta.url).href).then((lib) => {
-    lib.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
+  pdfjsReady ??= import(new URL('./node_modules/pdfjs-dist/pdf.min.mjs', import.meta.url).href).then((lib) => {
+    lib.GlobalWorkerOptions.workerSrc = new URL('./node_modules/pdfjs-dist/pdf.worker.min.mjs', import.meta.url).href;
     return lib;
   });
   return pdfjsReady;

@@ -7,7 +7,7 @@ const VERSION = 'openpad-dev';
 const FILES = [
   './', 'app.html', 'app.js', 'editor.js', 'ink.js', 'link.js', 'model.js', 'scan.js', 'store.js', 'ui.js',
   'style.css', 'icon.svg', 'icon.png', 'manifest.webmanifest',
-  'vendor/pdfjs/pdf.min.mjs', 'vendor/pdfjs/pdf.worker.min.mjs', 'vendor/jsqr/jsqr.js',
+  'node_modules/pdfjs-dist/pdf.min.mjs', 'node_modules/pdfjs-dist/pdf.worker.min.mjs', 'node_modules/jsqr/jsqr.js',
 ];
 
 self.addEventListener('install', (e) => {

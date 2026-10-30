@@ -4,7 +4,7 @@
 let jsQR = null;
 async function loadJsQR() {
   if (!jsQR) {
-    await import(new URL('./vendor/jsqr/jsqr.js', import.meta.url).href); // UMD: sets self.jsQR
+    await import(new URL('./node_modules/jsqr/jsqr.js', import.meta.url).href); // UMD: sets self.jsQR
     jsQR = self.jsQR;
   }
   return jsQR;
