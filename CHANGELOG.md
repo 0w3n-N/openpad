@@ -4,6 +4,11 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.6.1 (2026-10-29)
+
+- Fixed: on the iPad, parts of a page could show as black squares, or with
+  paper lines that didn't line up, until you zoomed.
+
 ## 0.6.0 (2026-10-29)
 
 The iPad app is now the main OpenPad app. Showing your notes live on the

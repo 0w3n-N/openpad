@@ -3,11 +3,14 @@ import PencilKit
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
-/// Paper and PDF pages, drawn in tiles so they stay sharp at any zoom.
+/// Paper and PDF pages, drawn in tiles so they stay sharp at any zoom. Its
+/// bounds are the page in page units and it's scaled with a transform: tiles
+/// drawn at one size never get stretched to another.
 final class TiledPageView: UIView {
     struct Content {
         var page: Page
         var pdfURL: URL?
+        var displayScale: CGFloat
     }
 
     override class var layerClass: AnyClass { CATiledLayer.self }
@@ -25,7 +28,10 @@ final class TiledPageView: UIView {
         tiled.levelsOfDetail = 4
         tiled.levelsOfDetailBias = 4
         tiled.tileSize = CGSize(width: 512, height: 512)
-        backgroundColor = .white
+        // Tiles not drawn yet stay see-through (the white page behind them
+        // shows), never black.
+        backgroundColor = .clear
+        isOpaque = false
         isUserInteractionEnabled = false
     }
 
@@ -33,11 +39,11 @@ final class TiledPageView: UIView {
 
     // Called on background threads, one tile at a time.
     override func draw(_ rect: CGRect) {
-        guard let content, let ctx = UIGraphicsGetCurrentContext(), bounds.width > 0 else { return }
+        guard let content, let ctx = UIGraphicsGetCurrentContext() else { return }
         let page = content.page
-        let k = bounds.width / CGFloat(page.w)
+        // Screen points per page unit at this tile's level of detail.
+        let k = max(0.01, abs(ctx.ctm.a) / max(1, content.displayScale))
         ctx.saveGState()
-        ctx.scaleBy(x: k, y: k)
         PageRenderer.drawPaper(page, in: ctx, scale: k)
         if let url = content.pdfURL, let sha = page.bg?.pdf, let n = page.bg?.n,
            let pdfPage = PDFAssets.shared.document(sha, url: url)?.page(at: n) {
@@ -129,8 +135,6 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
         backdrop.layer.shadowColor = UIColor.black.cgColor
         backdrop.layer.shadowOpacity = 0.35
         backdrop.layer.shadowRadius = 12
-        tiled.frame = backdrop.bounds
-        tiled.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         imageView.frame = backdrop.bounds
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         imageView.contentMode = .scaleToFill
@@ -190,7 +194,7 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
     private func configureBackground(_ page: Page) {
         guard let model else { return }
         let pdfURL = page.bg?.pdf.map { model.store.assetURL($0) }
-        tiled.content = TiledPageView.Content(page: page.metaOnly, pdfURL: pdfURL)
+        tiled.content = TiledPageView.Content(page: page.metaOnly, pdfURL: pdfURL, displayScale: view.traitCollection.displayScale)
         if let sha = page.bg?.img {
             imageView.image = PDFAssets.shared.image(sha, store: model.store)
         } else if page.bg?.live == true {
@@ -266,6 +270,14 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIGest
         let size = CGSize(width: pageSize.width * z, height: pageSize.height * z)
         canvas.contentSize = size
         backdrop.frame = CGRect(origin: .zero, size: size)
+        let pageRect = CGRect(origin: .zero, size: pageSize)
+        if tiled.bounds != pageRect {
+            tiled.transform = .identity
+            tiled.bounds = pageRect
+            tiled.setNeedsDisplay()
+        }
+        tiled.transform = CGAffineTransform(scaleX: z, y: z)
+        tiled.center = CGPoint(x: size.width / 2, y: size.height / 2)
         let insetX = max(16, (canvas.bounds.width - size.width) / 2)
         // Portrait pages start at the top, like paper (the tool palette sits
         // at the bottom); wide pages are centered.
