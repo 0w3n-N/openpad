@@ -4,6 +4,21 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.0 (2026-10-30)
+
+- **The iPad app has OpenPad's own ink and the web app's tools** instead of
+  Apple's: pen, highlighter, eraser, select and move, and shapes (line,
+  arrow, box, ellipse, axes), with seven colors, three widths, undo and redo.
+  Hold the Pencil still at the end of a stroke to straighten it.
+- **Pressure sensitivity** in Settings, with a preview, sets how much
+  pressing harder thickens the line.
+- Ink looks the same on the iPad, on the computer and in PDFs, and stays
+  sharp at any zoom.
+- Strokes show on the computer while you write them, and guests' strokes
+  show on the iPad while they write them.
+- The Pencil's double-tap and squeeze switch to the eraser and back (or as
+  set in Settings › Apple Pencil).
+
 ## 0.6.1 (2026-10-29)
 
 - Fixed: on the iPad, parts of a page could show as black squares, or with

@@ -307,7 +307,7 @@ struct ToolRow: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 tool(.pen, "pencil.tip", "Pen")
                 tool(.highlighter, "highlighter", "Highlighter")
                 tool(.eraser, "eraser", "Eraser")
@@ -322,7 +322,7 @@ struct ToolRow: View {
                             .frame(width: 24, height: 24)
                             .padding(4)
                             .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: model.color == c ? 2.5 : 0))
-                            .frame(width: 38, height: 38)
+                            .frame(width: 34, height: 36)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Color \(c)")
@@ -357,7 +357,7 @@ struct ToolRow: View {
     }
 
     private var divider: some View {
-        Divider().frame(height: 22).padding(.horizontal, 6)
+        Divider().frame(height: 22).padding(.horizontal, 5)
     }
 
     private func tool(_ t: InkTool, _ icon: String, _ label: String) -> some View {
