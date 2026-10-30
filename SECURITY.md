@@ -57,8 +57,10 @@ what the plugin does on your system.
   (CORS) but is refused with guest tokens.
 - **Connecting the installed app.** It reads the key from the QR code the
   computer shows (the same code as the Safari link), or trades the 6-digit
-  PIN shown under it for the key. A PIN expires after 10 minutes or 5 wrong tries, works
-  once, and the server accepts one try per second.
+  PIN shown under it for the key. A PIN exists only once the computer's screen
+  shows one, expires after 10 minutes or 5 wrong tries, works once, and the
+  server accepts one try per second. After 20 wrong PINs in a day, PIN pairing
+  stops (the QR code still works) until the day is up or OpenPad restarts.
 - **Opening the share window** uses a one-time code that expires after 60 s,
   so the key never appears on a process command line.
 - **Input** from devices is validated and rebuilt before it's stored, merged or

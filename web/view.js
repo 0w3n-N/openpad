@@ -1,7 +1,7 @@
 // The share window: the live notebook, big and clean for Zoom/Teams/Meet.
 // Opened by the computer (bar icon or `openpad`), never by a link.
 
-import { Backgrounds, Surface, buildPDF, drawStroke, pdfInfo, pdfName, savePDF } from './ink.js';
+import { Backgrounds, Surface, buildPDF, pdfInfo, pdfName, savePDF } from './ink.js';
 import { PROTOCOL, socket } from './link.js';
 import { applyOp, indexStrokes, mergeInto, normalize, order, sectionOf, sha256Hex } from './model.js';
 
@@ -69,7 +69,6 @@ let idx = new Map();
 let pid = null;
 let pads = 0;
 let placeholder = false; // nothing on screen yet
-const previews = new Map(); // strokes still being drawn on the iPad: id -> {page, pts, color, width, tool, t}
 let pairForced = null; // null = automatic, true/false = user toggled
 let cursor = null; // {page, x, y}
 
@@ -144,18 +143,6 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       renderSync();
       return toast(msg.ok ? `Synced ${msg.notebooks} notebook${msg.notebooks === 1 ? '' : 's'} from the iPad` : `Sync failed: ${msg.error || 'unknown error'}`, 4000);
     }
-    if (msg.t === 'preview') {
-      const p = previews.get(msg.id) || { page: msg.page, pts: [], color: msg.color, width: msg.width, tool: msg.tool };
-      if (msg.end) previews.delete(msg.id);
-      else {
-        p.pts.push(...msg.pts);
-        p.t = Date.now();
-        previews.set(msg.id, p);
-        const last = msg.pts[msg.pts.length - 1];
-        if (last && p.page === pid) keepInView(last[0], last[1]);
-      }
-      return surface.queueLive();
-    }
     if (msg.t === 'cursor') {
       cursor = msg.hide ? null : { page: msg.page, x: msg.x, y: msg.y };
       if (cursor && cursor.page === pid) keepInView(cursor.x, cursor.y);
@@ -197,13 +184,8 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
   },
 });
 
-// Pen tip / hover cursor so viewers can follow along, and strokes the iPad
-// is still drawing.
+// Pen tip / hover cursor so viewers can follow along.
 surface.overlay = (ctx, k) => {
-  for (const [id, p] of previews) {
-    if (Date.now() - p.t > 4000) previews.delete(id);
-    else if (p.page === pid) drawStroke(ctx, { ...p, id }, k);
-  }
   let at = null;
   for (const s of surface.active.values()) {
     const p = s.pts[s.pts.length - 1];
@@ -384,7 +366,8 @@ async function loadInfo(force = false) {
     else toast('No Wi-Fi address found. Connect to a network, then restart OpenPad.', 6000);
     const p = await (await api('/api/pairing')).json();
     $('#pinaddr').textContent = p.addresses[0] || '—';
-    $('#pincode').textContent = p.pin;
+    $('#pincode').textContent = p.pin || '—';
+    if (p.locked) toast('Too many wrong PINs were tried today. Pair with the QR code instead.', 6000);
     infoLoaded = Date.now();
   } catch {}
 }

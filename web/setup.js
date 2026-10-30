@@ -10,7 +10,7 @@ async function refresh() {
     if (!r.ok) throw new Error();
     const p = await r.json();
     $('#addr').textContent = p.addresses[0] || location.host;
-    $('#pin').textContent = p.pin;
+    $('#pin').textContent = p.pin || '— (too many wrong tries today: use the QR code)';
     $('#fp').textContent = p.fingerprint;
     $('#openapp').href = p.app;
     setTimeout(refresh, Math.max(5, Math.min(60, p.expires)) * 1000);

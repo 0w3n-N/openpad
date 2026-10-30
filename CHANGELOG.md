@@ -4,6 +4,21 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.1 (2026-10-30)
+
+- **PIN pairing is harder to guess.** A PIN is dropped after 5 wrong tries,
+  and a new one appears only when the computer's screen asks for it, instead
+  of right away. After 20 wrong PINs in a day, only the QR code pairs. Before,
+  someone on the same Wi-Fi could keep guessing for as long as the share
+  window was open.
+- Guests can no longer end a stroke someone else is drawing.
+- The computer no longer relays the old iPad stroke previews (unused since
+  0.7.0).
+- The Sync button works with a sync folder whose name starts with "-".
+- Folder and file names in the sync folder never end in a dot or space, and
+  avoid Windows' reserved names like `COM1.notes`.
+- `scripts/uninstall` finds OpenPad's data on macOS.
+
 ## 0.7.0 (2026-10-30)
 
 - **The iPad app has OpenPad's own ink and the web app's tools** instead of

@@ -101,7 +101,11 @@ export class Link {
     } catch {
       throw new ConnectError(`Couldn't reach ${withPort}.`, scheme === 'https' ? `http://${withPort}/setup` : null);
     }
-    if (!r.ok) throw new ConnectError(r.status === 403 ? 'Wrong or expired PIN. Check the PIN on the computer and try again.' : `Pairing failed (${r.status})`);
+    if (!r.ok) {
+      throw new ConnectError(r.status === 403 ? 'Wrong or expired PIN. Check the PIN on the computer and try again.'
+        : r.status === 429 ? 'Too many wrong PINs were tried today. Scan the QR code on the computer instead.'
+        : `Pairing failed (${r.status})`);
+    }
     const { k } = await r.json();
     return Link.connect(withPort, k);
   }

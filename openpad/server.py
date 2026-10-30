@@ -72,6 +72,9 @@ WS_PING_EVERY = 25
 LAUNCH_CODE_TTL = 60
 PIN_TTL = 600
 PIN_TRIES = 5
+# Wrong PINs allowed per day before PIN pairing locks (the QR code still works).
+# With one PIN live at a time, guessing a 6-digit PIN stays out of reach.
+PIN_FAILS_PER_DAY = 20
 
 PAGES = {"/": "app.html", "/app": "app.html", "/view": "view.html", "/join": "join.html", "/setup": "setup.html"}
 TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -486,7 +489,8 @@ class Hub:
                 out = {"t": "pts", "id": s["id"], "pts": pts}
             elif t == "end" and conn.write:
                 sid = N.clean_id(msg.get("id"))
-                if sid not in self.strokes:
+                s, _ = self.strokes.get(sid or "", (None, None))
+                if not s or s.get("by") != conn.by:
                     return
                 out = {"t": "end", "id": sid}
             elif t == "remove" and page and conn.write:
@@ -542,20 +546,6 @@ class Hub:
                     self.live_stop()
                 self._set(target, msg.get("page") if isinstance(msg.get("page"), str) else None)
                 self.send_state()
-                return
-            elif t == "preview" and conn.role == "pad" and page and not self.placeholder:
-                # A stroke still being drawn on the iPad (PencilKit only hands
-                # over finished strokes): shown live, never stored.
-                pid = N.clean_id(msg.get("id"))
-                pts = N.clean_points(msg.get("pts"), 400)
-                color = msg.get("color")
-                if not pid:
-                    return
-                out = {"t": "preview", "page": page["id"], "id": pid, "pts": pts, "end": msg.get("end") is True,
-                       "tool": msg.get("tool") if msg.get("tool") in N.TOOLS else "pen",
-                       "color": color if isinstance(color, str) and N.COLOR_RE.match(color) else "#111111",
-                       "width": N.num(msg.get("width"), 0.5, 80) or 3.5, "from": conn.id}
-                self.broadcast(out, skip=conn)
                 return
             elif t == "sync-done" and conn.role == "pad":
                 report = {"time": int(time.time()), "ok": msg.get("ok") is True,
@@ -778,7 +768,9 @@ class Guests:
 
 class Pairing:
     """A short PIN the installed app trades for the key (typing a 22-character
-    key on an iPad is no fun). Few tries per PIN, then a new one."""
+    key on an iPad is no fun). A PIN exists only after the owner's screen asks
+    for one, works once, and is dropped after a few wrong tries; wrong tries
+    across all PINs are capped per day, then only the QR code pairs."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -786,17 +778,31 @@ class Pairing:
         self.expires = 0.0
         self.tries = 0
         self.last_try = 0.0
+        self.fails: list[float] = []  # when wrong PINs were tried (the last day's)
+
+    def _locked(self, now):
+        self.fails = [t for t in self.fails if now - t < 86400]
+        return len(self.fails) >= PIN_FAILS_PER_DAY
+
+    def locked(self):
+        with self.lock:
+            return self._locked(time.monotonic())
 
     def current(self):
+        """The PIN to show ("" while locked) and its seconds left."""
         with self.lock:
-            if time.monotonic() >= self.expires:
-                self._new()
-            return self.pin, int(self.expires - time.monotonic())
+            now = time.monotonic()
+            if self._locked(now):
+                self._drop()
+                return "", 0
+            if now >= self.expires:
+                self.pin = f"{secrets.randbelow(1_000_000):06d}"
+                self.expires = now + PIN_TTL
+                self.tries = 0
+            return self.pin, int(self.expires - now)
 
-    def _new(self):
-        self.pin = f"{secrets.randbelow(1_000_000):06d}"
-        self.expires = time.monotonic() + PIN_TTL
-        self.tries = 0
+    def _drop(self):
+        self.pin, self.expires, self.tries = "", 0.0, 0
 
     def check(self, pin):
         with self.lock:
@@ -804,12 +810,14 @@ class Pairing:
             if now - self.last_try < 1:  # one try per second, for everyone
                 return False
             self.last_try = now
-            if now >= self.expires or not isinstance(pin, str):
+            if self._locked(now) or not self.pin or now >= self.expires or not isinstance(pin, str):
                 return False
-            self.tries += 1
             ok = same(pin.strip(), self.pin)
+            if not ok:
+                self.fails.append(now)
+                self.tries += 1
             if ok or self.tries >= PIN_TRIES:
-                self._new()
+                self._drop()  # the owner's screen shows a new one
             return ok
 
 
@@ -988,7 +996,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, qr.svg(url, border=1).encode(), "image/svg+xml") if url else self._deny(404, "no link")
         if path == "/api/pairing":
             pin, left = self.app.pairing.current()
-            return self._json({"pin": pin, "expires": left, "addresses": self.app.addresses(), "name": socket.gethostname(),
+            return self._json({"pin": pin, "expires": left, "locked": not pin, "addresses": self.app.addresses(), "name": socket.gethostname(),
                                "fingerprint": self.app.ca.fingerprint(), "app": APP_URL})
         if path == "/api/ca.crt":
             return self._send(200, self.app.ca.ca_der, "application/x-x509-ca-cert",
@@ -1027,6 +1035,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self._origin_ok(True):
                 return self._deny()
             body = self._read_small_body()
+            if self.app.pairing.locked():
+                return self._deny(429, "too many wrong PINs today; pair with the QR code instead")
             if not self.app.pairing.check(body.get("pin") if isinstance(body, dict) else None):
                 return self._deny(403, "wrong or expired PIN")
             return self._json({"k": self.app.token, "name": socket.gethostname()})

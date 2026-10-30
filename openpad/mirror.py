@@ -27,10 +27,11 @@ RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT
 def safe_name(text, fallback):
     """One path segment: no separators, control or reserved characters, and
     never starting or ending with a dot (so never "." or "..")."""
-    name = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', "", str(text)).strip().strip(".").strip()
-    if name.upper() in RESERVED:
+    name = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', "", str(text))[:80]
+    name = re.sub(r"^[\s.]+|[\s.]+$", "", name)  # after cutting, so it never ends in a dot or space
+    if name.split(".")[0].strip().upper() in RESERVED:  # Windows also reserves "CON.txt"
         name = ""
-    return (name or fallback)[:80]
+    return name or fallback
 
 
 def file_type(path: Path) -> str:

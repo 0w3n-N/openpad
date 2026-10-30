@@ -626,22 +626,25 @@ check("view-only guests' ink is ignored", "v1" not in srv.hub.strokes)
 send(gw, {"t": "begin", "page": pid, "s": stroke("g1", by="gsomeoneelse")})
 m = recv_until(pad, "begin")
 check("guest ink is tagged with the guest's id", m["s"]["id"] == "g1" and m["s"].get("by") == "galice1", m)
-send(pad, {"t": "preview", "page": pid, "id": "pv1", "pts": [[1, 2, 0.5], ["x"]], "color": "red", "width": 999, "tool": "<b>"})
-m = recv_until(gw, "preview")
-check("a stroke still being drawn on the iPad is shown live", m.get("pts") == [[1, 2, 0.5]] and m.get("color") == "#111111"
-      and m.get("width") == 80 and m.get("tool") == "pen", m)
-check("and not stored", "pv1" not in srv.hub.strokes)
-send(gw, {"t": "preview", "page": pid, "id": "pv2", "pts": [[1, 2, 0.5]]})
+send(pad, {"t": "preview", "page": pid, "id": "pv1", "pts": [[1, 2, 0.5]]})
+send(gw, {"t": "end", "id": sid})
 time.sleep(0.3)
 got = []
-pad.settimeout(0.5)
 try:
     while True:
         kind, m = recv_any(pad, 0.5)
         got.append(m)
 except (OSError, ConnectionError):
     pass
-check("guests can't send previews", not any(isinstance(x, dict) and x.get("t") == "preview" for x in got))
+try:
+    while True:
+        kind, m = recv_any(gv, 0.5)
+        got.append(m)
+except (OSError, ConnectionError):
+    pass
+types = {x.get("t") for x in got if isinstance(x, dict)}
+check("the old PencilKit preview message isn't relayed", "preview" not in types, types)
+check("guests can't end the owner's strokes", "end" not in types, types)
 send(gw, {"t": "pts", "id": sid, "pts": [[5, 5, 0.5]]})
 send(gw, {"t": "remove", "page": pid, "ids": [sid]})
 time.sleep(0.3)
@@ -699,6 +702,38 @@ time.sleep(1.05)
 check("guesses are rate-limited", [http("POST", "/api/pair", body=b'{"pin":"1"}')[0] for _ in range(2)] == [403, 403]
       and srv.pairing.tries <= 1)
 check("pairing from other origins refused", http("POST", "/api/pair", {"Origin": "https://evil.example"}, b'{"pin":"1"}')[0] == 403)
+
+from openpad.server import PIN_FAILS_PER_DAY, PIN_TRIES, Pairing  # noqa: E402
+
+
+def guess(pg, pin):
+    pg.last_try -= 2  # skip the one-second wait
+    return pg.check(pin)
+
+
+pg = Pairing()
+check("no PIN works until the owner's screen shows one", not guess(pg, "000000") and not guess(pg, ""))
+pin = pg.current()[0]
+wrong = "%06d" % ((int(pin) + 1) % 1_000_000)
+for _ in range(PIN_TRIES):
+    guess(pg, wrong)
+check("a PIN is dropped after a few wrong tries", not guess(pg, pin) and pg.pin == "")
+check("and expired PINs don't come back on their own", pg.expires == 0)
+pin = pg.current()[0]
+check("the owner's screen gets a new one", re.fullmatch(r"\d{6}", pin) and guess(pg, pin))
+pg = Pairing()
+for _ in range(PIN_FAILS_PER_DAY):
+    pin = pg.current()[0]
+    guess(pg, "%06d" % ((int(pin) + 1) % 1_000_000))
+check("wrong PINs are capped per day", pg.locked() and pg.current() == ("", 0) and not guess(pg, pg.pin))
+pg.fails = [t - 86401 for t in pg.fails]
+check("the cap lifts after a day", not pg.locked() and re.fullmatch(r"\d{6}", pg.current()[0]))
+real, srv.pairing = srv.pairing, pg
+pg.fails = [time.monotonic()] * PIN_FAILS_PER_DAY
+code, _, body = http("POST", "/api/pair", {"Content-Type": "application/json"}, b'{"pin":"123456"}')
+info = json.loads(http("GET", f"/api/pairing?k={KEY}")[2])
+check("a locked computer says so (429) and shows no PIN", code == 429 and info["locked"] and info["pin"] == "", (code, info))
+srv.pairing = real
 
 print("== HTTPS on the same port")
 ca_pem = os.path.join(DATA, "tls", "ca.pem")

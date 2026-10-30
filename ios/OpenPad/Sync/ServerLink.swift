@@ -96,7 +96,8 @@ final class ServerLink: @unchecked Sendable {
         guard status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let key = obj["k"] as? String else {
             throw ConnectError(message: status == 403 ? "Wrong or expired PIN. Check the PIN on the computer and try again."
-                                                      : "Connecting failed (\(status)).")
+                                      : status == 429 ? "Too many wrong PINs were tried today. Scan the QR code on the computer instead."
+                                      : "Connecting failed (\(status)).")
         }
         return try await connect(host: host, key: key)
     }

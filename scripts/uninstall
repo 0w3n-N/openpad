@@ -6,6 +6,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/openpad"
+if [[ "$(uname)" == "Darwin" && -z ${XDG_DATA_HOME:-} ]]; then
+  DATA_DIR="$HOME/Library/Application Support/openpad"
+fi
 APP_DIR="$HOME/.local/share/applications"
 
 ask() {

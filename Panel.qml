@@ -81,7 +81,8 @@ Panel {
 
   function syncNow() {
     var folder = String(setting("syncFolder", "") || "").trim()
-    runCli("sync", folder !== "" ? ["--folder", folder] : [])
+    // One argument, so a folder starting with "-" isn't read as an option.
+    runCli("sync", folder !== "" ? ["--folder=" + folder] : [])
   }
 
   function invite() {

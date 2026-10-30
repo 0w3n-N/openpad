@@ -2,7 +2,7 @@
 // links can add ink (and erase their own); "view" links only watch. Anyone
 // can save pages as a PDF.
 
-import { Backgrounds, COLORS, buildPDF, drawStroke, pdfName, savePDF } from './ink.js';
+import { Backgrounds, COLORS, buildPDF, pdfName, savePDF } from './ink.js';
 import { Editor } from './editor.js';
 import { PROTOCOL, socket } from './link.js';
 import { fitToolbar } from './ui.js';
@@ -117,28 +117,13 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       cursor = msg.hide ? null : msg;
       return editor.surface.queueLive();
     }
-    if (msg.t === 'preview') {
-      const p = previews.get(msg.id) || { page: msg.page, pts: [], color: msg.color, width: msg.width, tool: msg.tool };
-      if (msg.end) previews.delete(msg.id);
-      else {
-        p.pts.push(...msg.pts);
-        p.t = Date.now();
-        previews.set(msg.id, p);
-      }
-      return editor.surface.queueLive();
-    }
     if (['begin', 'pts', 'end', 'remove', 'restore'].includes(msg.t)) editor.applyRemote(msg);
   },
 }, { queueOffline: true });
 
-// The presenter's pen, so you can follow along, and strokes they're still drawing.
+// The presenter's pen, so you can follow along.
 let cursor = null;
-const previews = new Map();
 editor.extraOverlay = (ctx, k) => {
-  for (const [id, p] of previews) {
-    if (Date.now() - p.t > 4000) previews.delete(id);
-    else if (p.page === editor.pid) drawStroke(ctx, { ...p, id }, k);
-  }
   if (!cursor || cursor.page !== editor.pid) return;
   ctx.beginPath();
   ctx.arc(cursor.x * k, cursor.y * k, Math.max(4, Math.min(14, 5 * k)), 0, Math.PI * 2);
