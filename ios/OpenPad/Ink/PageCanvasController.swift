@@ -952,10 +952,18 @@ final class PageCanvasController: UIViewController, UIScrollViewDelegate, UIGest
         model.setTool(.pen)
         model.pickColor("#1f5fd6")
         model.width = 6.5
-        stroke((0...40).map { i in (150 + Double(i) * 10, 1100 + sin(Double(i) / 4) * 30) })
+        var wave: [(Double, Double)] = []
+        for i in 0...40 {
+            let x: Double = 150 + Double(i) * 10
+            let y: Double = 1100 + sin(Double(i) / 4) * 30
+            wave.append((x, y))
+        }
+        stroke(wave)
         model.setTool(.highlighter)
         model.pickColor(Ink.colors[0])
-        stroke((0...30).map { i in (150 + Double(i) * 12, 1180) }, pressure: nil)
+        var flat: [(Double, Double)] = []
+        for i in 0...30 { flat.append((150 + Double(i) * 12, 1180)) }
+        stroke(flat, pressure: nil)
         model.setTool(.shape)
         model.shape = .rect
         model.width = 3.5
