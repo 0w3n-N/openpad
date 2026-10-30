@@ -20,7 +20,7 @@ export const now = () => Date.now();
 
 export function blankPage(sec, size = 'letter', paper = 'lines', t = now()) {
   const s = SIZES[size] || SIZES.letter;
-  return { id: newId(), t, sec, w: PAGE_W, h: s.h, paper, bg: null, pt: [...s.pt], strokes: [], gone: [] };
+  return { id: newId(), t, sec, w: PAGE_W, h: s.h, paper, bg: null, pt: [...s.pt], title: '', strokes: [], gone: [] };
 }
 
 export function newNotebook(title = 'Notebook', size = 'letter', section = 'Notes', paper = 'lines') {
@@ -28,7 +28,7 @@ export function newNotebook(title = 'Notebook', size = 'letter', section = 'Note
   const sec = newId();
   const page = blankPage(sec, size, paper, t);
   return finish({
-    v: 1, id: newId(), title, size, metaT: t, created: t,
+    v: 1, id: newId(), title, size, folder: '', metaT: t, created: t,
     layout: { t, sections: [{ id: sec, title: section, pages: [page.id] }] },
     goneP: [], pages: { [page.id]: page },
   });
@@ -42,6 +42,7 @@ export function normalize(nb) {
   nb.v = 1;
   nb.title ??= 'Untitled notebook';
   nb.size = SIZES[nb.size] ? nb.size : 'letter';
+  nb.folder ??= '';
   nb.metaT ??= 0;
   nb.created ??= 0;
   nb.layout ??= { t: 0, sections: [] };
@@ -55,6 +56,7 @@ export function normalize(nb) {
     p.paper ??= 'blank';
     p.bg ??= null;
     p.pt ??= [612, 792];
+    p.title ??= '';
     p.strokes ??= [];
     p.gone ??= [];
   }
@@ -80,7 +82,7 @@ function mergePage(a, b) {
     if (!old || s.pts.length > old.pts.length) strokes.set(s.id, s);
   }
   return {
-    id: a.id, t: meta.t, sec: meta.sec, w: PAGE_W, h: meta.h, paper: meta.paper, bg: meta.bg, pt: meta.pt,
+    id: a.id, t: meta.t, sec: meta.sec, w: PAGE_W, h: meta.h, paper: meta.paper, bg: meta.bg, pt: meta.pt, title: meta.title ?? '',
     strokes: [...strokes.values()].sort(byZ),
     gone: [...gone].sort(),
   };
@@ -89,7 +91,7 @@ function mergePage(a, b) {
 export function merge(a, b) {
   if (!a) return b;
   if (!b) return a;
-  const meta = tuple([a.metaT, a.title, a.size], [b.metaT, b.title, b.size]) >= 0 ? a : b;
+  const meta = tuple([a.metaT, a.title, a.size, a.folder ?? ''], [b.metaT, b.title, b.size, b.folder ?? '']) >= 0 ? a : b;
   const created = [a.created, b.created].filter(Boolean);
   const goneP = new Set([...a.goneP, ...b.goneP]);
   const pages = {};
@@ -99,7 +101,7 @@ export function merge(a, b) {
     pages[id] = pa && pb ? mergePage(pa, pb) : pa || pb;
   }
   return finish({
-    v: 1, id: a.id, title: meta.title, size: meta.size, metaT: meta.metaT,
+    v: 1, id: a.id, title: meta.title, size: meta.size, folder: meta.folder ?? '', metaT: meta.metaT,
     created: created.length ? Math.min(...created) : 0,
     layout: tuple(layoutKey(a.layout), layoutKey(b.layout)) >= 0 ? a.layout : b.layout,
     goneP: [...goneP].sort(),
@@ -115,7 +117,7 @@ export function finish(nb) {
   let sections = nb.layout.sections.map((s) => {
     const pages = s.pages.filter((id) => alive.has(id) && !seen.has(id));
     pages.forEach((id) => seen.add(id));
-    return { id: s.id, title: s.title, pages };
+    return { id: s.id, title: s.title, pages, ...(s.color ? { color: s.color } : {}) };
   });
   if (!sections.length) sections = [{ id: 'main', title: 'Notes', pages: [] }];
   const byId = new Map(sections.map((s) => [s.id, s]));
@@ -255,7 +257,7 @@ export function applyOp(nb, idx, msg) {
 // A partial notebook carrying only what a structural edit changed.
 export function partial(nb, { meta = false, layout = false, pages = [], goneP = [] } = {}) {
   const out = { id: nb.id, goneP, pages: {} };
-  if (meta) Object.assign(out, { title: nb.title, size: nb.size, metaT: nb.metaT });
+  if (meta) Object.assign(out, { title: nb.title, size: nb.size, folder: nb.folder ?? '', metaT: nb.metaT });
   if (layout) out.layout = nb.layout;
   for (const id of pages) {
     const p = nb.pages[id];
@@ -267,7 +269,7 @@ export function partial(nb, { meta = false, layout = false, pages = [], goneP = 
 // Merge a partial into nb in place (keeps object identity for callers).
 export function mergeInto(nb, part) {
   const full = normalize({ metaT: 0, layout: { t: 0, sections: [] }, ...structuredClone(part) });
-  if (!('title' in part)) Object.assign(full, { title: nb.title, size: nb.size, metaT: 0 });
+  if (!('title' in part)) Object.assign(full, { title: nb.title, size: nb.size, folder: nb.folder ?? '', metaT: 0 });
   const m = merge(nb, full);
   for (const k of Object.keys(nb)) delete nb[k];
   Object.assign(nb, m);

@@ -44,6 +44,7 @@ public func partial(_ nb: Notebook, meta: Bool = false, layout: Bool = false, pa
     if meta {
         out["title"] = nb.title
         out["size"] = nb.size
+        out["folder"] = nb.folder
         out["metaT"] = nb.metaT
     }
     if layout { out["layout"] = jsonObject(nb.layout) }
@@ -63,6 +64,7 @@ public func mergePartial(_ nb: Notebook, _ part: [String: Any]) -> Notebook {
     if obj["title"] == nil {
         obj["title"] = nb.title
         obj["size"] = nb.size
+        obj["folder"] = nb.folder
         obj["metaT"] = 0
     }
     if obj["layout"] == nil { obj["layout"] = ["t": 0, "sections": [Any]()] as [String: Any] }

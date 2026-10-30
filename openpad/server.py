@@ -294,6 +294,7 @@ class Hub:
         self._native = None
         self.nb = None
         self.page = None
+        self.on_sync = lambda report: None  # an iPad finished a sync it was asked for
         self._pick_initial()
 
     def native_capture(self):
@@ -343,7 +344,7 @@ class Hub:
     def _fresh(self, title, section_title, pages, sec):
         """A new notebook (when there's nothing on screen to add pages to)."""
         t = N.now_ms()
-        nb = N.finish({"v": 1, "id": N.new_id(), "title": title, "size": "wide", "metaT": t, "created": t,
+        nb = N.finish({"v": 1, "id": N.new_id(), "title": title, "size": "wide", "folder": "", "metaT": t, "created": t,
                        "layout": {"t": t, "sections": [{"id": sec, "title": section_title, "pages": list(pages)}]},
                        "goneP": [], "pages": dict(pages)})
         self._set(self.store.put(nb), next(iter(pages)))
@@ -422,6 +423,14 @@ class Hub:
                 self.broadcast({"t": "cursor", "hide": True, "from": conn.id})
         conn.close()
         self.on_change()
+
+    def request_sync(self):
+        """The computer's Sync button: ask connected notes apps to sync now."""
+        with self.lock:
+            pads = [c for c in self.conns if c.role == "pad"]
+        for c in pads:
+            c.send({"t": "sync-request"})
+        return len(pads)
 
     def kick_guests(self):
         with self.lock:
@@ -533,6 +542,27 @@ class Hub:
                     self.live_stop()
                 self._set(target, msg.get("page") if isinstance(msg.get("page"), str) else None)
                 self.send_state()
+                return
+            elif t == "preview" and conn.role == "pad" and page and not self.placeholder:
+                # A stroke still being drawn on the iPad (PencilKit only hands
+                # over finished strokes): shown live, never stored.
+                pid = N.clean_id(msg.get("id"))
+                pts = N.clean_points(msg.get("pts"), 400)
+                color = msg.get("color")
+                if not pid:
+                    return
+                out = {"t": "preview", "page": page["id"], "id": pid, "pts": pts, "end": msg.get("end") is True,
+                       "tool": msg.get("tool") if msg.get("tool") in N.TOOLS else "pen",
+                       "color": color if isinstance(color, str) and N.COLOR_RE.match(color) else "#111111",
+                       "width": N.num(msg.get("width"), 0.5, 80) or 3.5, "from": conn.id}
+                self.broadcast(out, skip=conn)
+                return
+            elif t == "sync-done" and conn.role == "pad":
+                report = {"time": int(time.time()), "ok": msg.get("ok") is True,
+                          "notebooks": int(N.num(msg.get("notebooks"), 0, 100000) or 0),
+                          "error": N.clean_text(msg.get("error"), "", 300)}
+                self.broadcast({"t": "sync-done", **report}, skip=conn)
+                self.on_sync(report)
                 return
             elif t == "cursor" and conn.owner:
                 x, y = N.num(msg.get("x"), -1e5, 1e5), N.num(msg.get("y"), -1e5, 1e5)
@@ -966,7 +996,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             with self.app.hub.lock:
                 return self._json({"notebooks": self.app.store.summaries(), "deleted": self.app.store.deleted,
-                                   "live": self.app.hub.nb["id"]})
+                                   "live": self.app.hub.nb["id"], "pdfs": self.app.store.mirror.pdf_digests(),
+                                   "syncFolder": str(self.app.store.notes)})
         m = re.fullmatch(r"/api/sync/nb/([A-Za-z0-9_-]{1,40})", path)
         if m:
             with self.app.hub.lock:
@@ -1033,6 +1064,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.app.info())
         if path == "/api/sync/nb":
             return self._sync_notebook()
+        if path == "/api/sync/request":
+            pads = self.app.hub.request_sync()
+            return self._json({"pads": pads, "syncFolder": str(self.app.store.notes), "lastSync": self.app.last_sync})
+        if path == "/api/settings":
+            body = self._read_small_body()
+            if not isinstance(body, dict):
+                return self._deny(400, "expected settings")
+            if "syncFolder" in body:
+                try:
+                    with self.app.hub.lock:
+                        self.app.store.set_sync_folder(body["syncFolder"])
+                except (ValueError, OSError) as e:
+                    return self._json({"error": f"Can't use that folder: {e}"}, 400)
+                self.app.mark_status()
+            return self._json(self.app.info())
         if path == "/api/sync/delete":
             body = self._read_small_body()
             nid = N.clean_id(body.get("id")) if isinstance(body, dict) else None
@@ -1073,7 +1119,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 with self.app.hub.lock:
-                    out = self.app.store.write_section_pdf(m.group(1), m.group(2), data)
+                    out = self.app.store.write_section_pdf(m.group(1), m.group(2), data,
+                                                           (self.headers.get("X-OpenPad-Digest") or "").strip())
             except (ValueError, OSError) as e:
                 return self._json({"error": str(e)}, 400)
             return self._json({"ok": True, "file": str(out)})
@@ -1360,6 +1407,12 @@ class OpenPadServer(ThreadingHTTPServer):
         self._status_dirty = True
         self.store = Store(self.data, notes)
         self.hub = Hub(self.store, self.data, on_change=self._mark_status)
+        self.hub.on_sync = self._synced
+        try:
+            self.last_sync = json.loads((self.data / "last-sync.json").read_text())
+        except (OSError, ValueError):
+            self.last_sync = None
+        self._mirror_now = False
         self.guests = Guests(self.data)
         self.pairing = Pairing()
         self.tunnel = Tunnel(port, self._mark_status)
@@ -1467,7 +1520,7 @@ class OpenPadServer(ThreadingHTTPServer):
         return {"urls": self.pad_urls(), "version": __version__, "setup": self.link("setup"), "app": APP_URL,
                 "guests": {"w": self.link("w"), "v": self.link("v"), "iw": self.link("iw"), "iv": self.link("iv"),
                            "count": self.hub.peers()["guests"], "internet": self.tunnel.info()},
-                "notes": str(self.store.notes)}
+                "notes": str(self.store.notes), "syncFolder": str(self.store.notes), "lastSync": self.last_sync}
 
     # one-time launch codes for opening the share window
     def new_launch_code(self):
@@ -1487,8 +1540,17 @@ class OpenPadServer(ThreadingHTTPServer):
             pass
         return self.token if expires and expires > time.monotonic() else None
 
+    def _synced(self, report):
+        self.last_sync = report
+        write_private(self.data / "last-sync.json", json.dumps(report))
+        self._mirror_now = True  # bring the copy fully up to date right away
+        self._status_dirty = True
+
     # status file for the Omarchy bar plugin
     def _mark_status(self):
+        self._status_dirty = True
+
+    def mark_status(self):
         self._status_dirty = True
 
     def write_status(self, running=True):
@@ -1504,6 +1566,7 @@ class OpenPadServer(ThreadingHTTPServer):
                   "guests": peers["guests"] if running else 0, "notebook": title,
                   "page": page, "pages": len(order), "live": self.hub.live["state"] if running else "idle",
                   "internet": self.tunnel.url if running else None,
+                  "syncFolder": str(self.store.notes), "lastSync": self.last_sync,
                   "guest_link": self.link("w") if running else None,
                   "updated": int(time.time())}
         try:
@@ -1516,6 +1579,11 @@ class OpenPadServer(ThreadingHTTPServer):
             items = self.store.flush()
         self.store.write_out(items)
 
+    def update_mirror(self, force=False):
+        with self.hub.lock:
+            items = self.store.mirror_items(force=force)
+        self.store.write_mirror(items)
+
     def _maintenance(self):
         tick = 0
         last_url = None
@@ -1525,6 +1593,9 @@ class OpenPadServer(ThreadingHTTPServer):
             try:
                 if tick % 2 == 0:
                     self.save()
+                if tick % 3 == 0 or self._mirror_now:
+                    force, self._mirror_now = self._mirror_now, False
+                    self.update_mirror(force)
                     if self.theme.changed():
                         self.hub.broadcast({"t": "theme", "v": self.theme.version})
                 if tick % WS_PING_EVERY == 0:
@@ -1559,6 +1630,7 @@ class OpenPadServer(ThreadingHTTPServer):
         self.tunnel.stop()
         try:
             self.save()
+            self.update_mirror(force=True)
             self.write_status(running=False)
         finally:
             super().server_close()

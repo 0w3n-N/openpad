@@ -302,6 +302,71 @@ def cmd_invite(args):
         print(f"Guest link (view only): {info['guests']['v']}")
 
 
+def cmd_sync(args):
+    """The Sync button: ask the iPad to sync now, so the sync folder is current."""
+    if not start_background(args):
+        sys.exit(1)
+    if args.folder:
+        set_sync_folder(args)
+    started = int(time.time())
+    res = request(args.port, "/api/sync/request", "POST", timeout=5, body={})
+    folder = res.get("syncFolder", "")
+    if not res.get("pads"):
+        print(f"Sync folder: {folder}\nWhile it's connected, the iPad also syncs by itself.", file=sys.stderr)
+        sys.exit("No iPad connected: open OpenPad on the iPad (same Wi-Fi), then sync again.")
+    print("Syncing the iPad…", flush=True)
+    report = None
+    for _ in range(240):  # two minutes: PDFs of big notebooks take a while
+        info = request(args.port, "/api/info")
+        last = info.get("lastSync") or {}
+        if last.get("time", 0) >= started:
+            report = last
+            break
+        time.sleep(0.5)
+    if not report:
+        sys.exit("The iPad didn't finish syncing. Keep OpenPad open on the iPad and try again.")
+    if not report.get("ok"):
+        sys.exit(f"Sync failed on the iPad: {report.get('error') or 'unknown error'}")
+    n = report.get("notebooks", 0)
+    print(f"Synced {n} notebook{'s' if n != 1 else ''} to {folder}")
+
+
+def set_sync_folder(args):
+    """Choose the sync folder (with the server running or not)."""
+    from .store import check_sync_folder
+
+    if ping(args.port):
+        req = urllib.request.Request(local(args.port, "/api/settings"), method="POST",
+                                     data=json.dumps({"syncFolder": args.folder}).encode(),
+                                     headers={"X-OpenPad-Key": token(), "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.load(r)["syncFolder"]
+        except urllib.error.HTTPError as e:
+            sys.exit(json.load(e).get("error", f"openpad: couldn't set the folder ({e.code})"))
+    try:
+        path = check_sync_folder(args.folder, data_dir())
+    except (ValueError, OSError) as e:
+        sys.exit(f"Can't use that folder: {e}")
+    try:
+        config = json.loads((data_dir() / "config.json").read_text())
+    except (OSError, ValueError):
+        config = {}
+    config["syncFolder"] = str(path)
+    write_private(data_dir() / "config.json", json.dumps(config))
+    return str(path)
+
+
+def cmd_sync_folder(args):
+    if args.folder:
+        print(f"Sync folder: {set_sync_folder(args)}")
+        print("Notebooks are copied there on the next sync. The old folder is left as it is.")
+        return
+    from .store import notes_dir
+
+    print(notes_dir(data_dir()))
+
+
 def cmd_board(args):
     cmd_open(args)
     if sys.stdout.isatty():
@@ -425,7 +490,7 @@ def cmd_doctor(args):
         "avahi": bool(active("avahi-daemon")) if linux else True,
         "firewall": firewall,
         "lan": lan[0] if lan else "",
-        "notes": str(notes_dir()),
+        "notes": str(notes_dir(data_dir())),
     }
     if args.json:
         print(json.dumps(report))
@@ -513,6 +578,16 @@ def main(argv=None):
     sp.add_argument("--internet", action="store_true", help="also make an internet link (Cloudflare quick tunnel)")
     sp.add_argument("--off", action="store_true", help="turn the internet link off")
     sp.set_defaults(fn=cmd_invite)
+
+    sp = sub.add_parser("sync", help="ask the iPad to sync now (keeps the sync folder current)")
+    common(sp)
+    sp.add_argument("--folder", help="use this sync folder from now on")
+    sp.set_defaults(fn=cmd_sync)
+
+    sp = sub.add_parser("sync-folder", help="show or choose the folder notebooks are copied to")
+    common(sp)
+    sp.add_argument("folder", nargs="?", help="new folder (e.g. ~/Documents/OpenPad)")
+    sp.set_defaults(fn=cmd_sync_folder)
 
     sp = sub.add_parser("status", help="show whether the server is running")
     common(sp)

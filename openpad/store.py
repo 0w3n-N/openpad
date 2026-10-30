@@ -3,8 +3,8 @@
   <data dir>/notebooks/<id>.json     notebook (strokes, layout), owner-only
   <data dir>/assets/<sha256>         PDFs and images pages show, by content hash
   <data dir>/notebooks/deleted.json  deleted notebooks, so sync doesn't bring them back
-  ~/Documents/OpenPad/<Notebook>/<Section>.pdf
-                                     readable copies the iPad renders while syncing
+  <sync folder>/...                  a browsable copy of everything (see mirror.py);
+                                     ~/Documents/OpenPad unless the user chose another
 
 Callers hold the server's lock; nothing here locks on its own.
 """
@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import notebook as N
+from .mirror import Mirror
 
 MAX_ASSET_BYTES = 200 * 1024 * 1024
 MAX_NOTEBOOKS = 1000
@@ -75,16 +76,38 @@ def documents_dir() -> Path:
     return Path(os.path.expanduser("~/Documents"))
 
 
-def notes_dir() -> Path:
+def notes_dir(data: Path | None = None) -> Path:
+    """The sync folder: $OPENPAD_NOTES, else the one chosen in settings, else ~/Documents/OpenPad."""
     custom = os.environ.get("OPENPAD_NOTES")
-    return Path(os.path.expanduser(custom)) if custom else documents_dir() / "OpenPad"
+    if custom:
+        return Path(os.path.expanduser(custom))
+    if data is not None:
+        try:
+            chosen = json.loads((data / "config.json").read_text()).get("syncFolder")
+            if isinstance(chosen, str) and os.path.isabs(os.path.expanduser(chosen)):
+                return Path(os.path.expanduser(chosen))
+        except (OSError, ValueError, AttributeError):
+            pass
+    return documents_dir() / "OpenPad"
 
 
-def safe_name(text, fallback):
-    name = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', "", text).strip().strip(".")
-    if name.upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}:
-        name = ""
-    return (name or fallback)[:80]
+def check_sync_folder(value, data: Path) -> Path:
+    """A folder the user may pick for the copy (raises ValueError if not)."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 1024 or "\x00" in value:
+        raise ValueError("choose a folder")
+    path = Path(os.path.expanduser(value.strip()))
+    if not path.is_absolute():
+        raise ValueError("use a full path, e.g. ~/Documents/OpenPad")
+    path = Path(os.path.normpath(path))
+    home = Path(os.path.expanduser("~"))
+    if path in (Path(path.anchor), home) or path == data or data in path.parents or path in data.parents:
+        raise ValueError("choose a folder of its own, e.g. ~/Documents/OpenPad")
+    if path.exists() and not path.is_dir():
+        raise ValueError("that's a file, not a folder")
+    path.mkdir(parents=True, exist_ok=True)
+    if not os.access(path, os.W_OK):
+        raise ValueError("OpenPad can't write to that folder")
+    return path
 
 
 class Store:
@@ -92,12 +115,34 @@ class Store:
         self.root = root
         self.nb_dir = private_dir(root / "notebooks")
         self.asset_dir = private_dir(root / "assets")
-        self.notes = notes or notes_dir()
+        self.mirror = Mirror(self.nb_dir, notes or notes_dir(root), write_private)
         self.cache: dict[str, dict] = {}
         self.dirty: set[str] = set()
+        self.mirror_due: dict[str, float] = {}  # nb id -> when it last changed
         self.deleted = self._read_json(self.nb_dir / "deleted.json", {})
-        self.folders = self._read_json(self.nb_dir / "folders.json", {})  # nb id -> {dir, sections: {id: file}}
         self._summaries: dict[str, dict] = {}
+
+    @property
+    def notes(self) -> Path:
+        return self.mirror.root
+
+    def set_sync_folder(self, value):
+        """Use another sync folder; everything is copied there afresh."""
+        path = check_sync_folder(value, self.root)
+        if path == self.mirror.root:
+            return path
+        try:
+            config = json.loads((self.root / "config.json").read_text())
+        except (OSError, ValueError):
+            config = {}
+        config["syncFolder"] = str(path)
+        write_private(self.root / "config.json", json.dumps(config))
+        self.mirror.set_root(path)
+        now = time.time() - 3600
+        for nid in self.ids():
+            if nid not in self.deleted:
+                self.mirror_due[nid] = now
+        return path
 
     @staticmethod
     def _read_json(path, default):
@@ -145,6 +190,7 @@ class Store:
 
     def touch(self, nid):
         self.dirty.add(nid)
+        self.mirror_due[nid] = time.time()
         self._summaries.pop(nid, None)
 
     def delete(self, nid, t):
@@ -154,18 +200,13 @@ class Store:
         self.cache.pop(nid, None)
         self.dirty.discard(nid)
         self._summaries.pop(nid, None)
+        self.mirror_due.pop(nid, None)
         trash = private_dir(self.root / "trash")
         src = self.nb_dir / f"{nid}.json"
         if src.exists():  # kept for a while in case the delete was a mistake
             os.replace(src, trash / f"{nid}-{int(time.time())}.json")
-        folder = self.folders.pop(nid, None)
-        if folder and (self.notes / folder["dir"]).is_dir():
-            try:
-                os.replace(self.notes / folder["dir"], trash / f"{folder['dir']}-{int(time.time())}")
-            except OSError:
-                pass
+        self.mirror.remove(nid, trash, int(time.time()))
         write_private(self.nb_dir / "deleted.json", json.dumps(self.deleted))
-        write_private(self.nb_dir / "folders.json", json.dumps(self.folders))
 
     def summaries(self):
         out = []
@@ -194,6 +235,30 @@ class Store:
     def write_out(self, items):
         for nid, data in items:
             write_private(self.nb_dir / f"{nid}.json", data)
+
+    def mirror_items(self, force=False, quiet_for=5.0):
+        """Notebooks to copy into the sync folder: those that stopped changing a
+        few seconds ago (or all pending ones, when forced)."""
+        now = time.time()
+        out = []
+        for nid, t in list(self.mirror_due.items()):
+            if not force and now - t < quiet_for:
+                continue
+            nb = self.get(nid)
+            self.mirror_due.pop(nid, None)
+            if not nb:
+                continue
+            files = {sha: self.asset_dir / sha for sha in N.assets(nb) if self.has_asset(sha)}
+            out.append((nid, nb["title"], nb.get("folder", ""), json.dumps(nb, separators=(",", ":")), files))
+        return out
+
+    def write_mirror(self, items):
+        for nid, title, folder, data, files in items:
+            try:
+                self.mirror.update(nid, title, folder, data, files)
+            except OSError as e:
+                sys.stderr.write(f"openpad: couldn't update the sync folder for {title!r}: {e}\n")
+                self.mirror_due.setdefault(nid, time.time())
 
     # ------------------------------------------------------------- assets
 
@@ -251,41 +316,17 @@ class Store:
 
     # ------------------------------------------------------------- readable PDFs
 
-    def write_section_pdf(self, nid, sid, data: bytes):
-        """Save one section as ~/Documents/OpenPad/<Notebook>/<Section>.pdf."""
+    def write_section_pdf(self, nid, sid, data: bytes, digest=""):
+        """Save one section as <sync folder>/<folder>/<Notebook>/<Section>.pdf."""
         nb = self.get(nid)
         sec = next((s for s in nb["layout"]["sections"] if s["id"] == sid), None) if nb else None
         if not sec:
             raise ValueError("unknown section")
         if not data.startswith(b"%PDF-"):
             raise ValueError("not a PDF")
-        private_dir(self.notes)
-        entry = self.folders.get(nid) or {"dir": "", "sections": {}}
-        want = safe_name(nb["title"], "Notebook")
-        taken = {f["dir"] for k, f in self.folders.items() if k != nid}
-        if want in taken:
-            want = f"{want} ({nid[:4]})"
-        if entry["dir"] != want:
-            if entry["dir"] and (self.notes / entry["dir"]).is_dir() and not (self.notes / want).exists():
-                os.replace(self.notes / entry["dir"], self.notes / want)  # notebook was renamed
-            entry["dir"] = want
-        folder = private_dir(self.notes / want)
-        name = safe_name(sec["title"], "Section")
-        others = {f for k, f in entry["sections"].items() if k != sid}
-        if f"{name}.pdf" in others:
-            name = f"{name} ({sid[:4]})"
-        old = entry["sections"].get(sid)
-        if old and old != f"{name}.pdf":
-            (folder / old).unlink(missing_ok=True)  # section was renamed
-        entry["sections"][sid] = f"{name}.pdf"
-        # Sections that no longer exist: their PDFs go too.
         live = {s["id"] for s in nb["layout"]["sections"]}
-        for gone in [k for k in entry["sections"] if k not in live]:
-            (folder / entry["sections"].pop(gone)).unlink(missing_ok=True)
-        self.folders[nid] = entry
-        write_private(folder / f"{name}.pdf", data)
-        write_private(self.nb_dir / "folders.json", json.dumps(self.folders))
-        return folder / f"{name}.pdf"
+        return self.mirror.write_pdf(nid, nb["title"], nb.get("folder", ""), sid, sec["title"], live, data,
+                                     digest if re.fullmatch(r"[0-9a-f]{8,64}", digest or "") else "")
 
     # ------------------------------------------------------------- Inkcast data
 
@@ -324,7 +365,7 @@ class Store:
             if pages:
                 title = (doc.get("pdf") or {}).get("name") or "Inkcast board"
                 nb = N.finish({"v": 1, "id": N.new_id(), "title": N.clean_text(title, "Inkcast board"),
-                               "size": "wide", "metaT": t, "created": t,
+                               "size": "wide", "folder": "", "metaT": t, "created": t,
                                "layout": {"t": t, "sections": [{"id": sec, "title": "Board", "pages": order}]},
                                "goneP": [], "pages": pages})
                 self.put(nb)

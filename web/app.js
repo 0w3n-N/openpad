@@ -120,6 +120,21 @@ function onMessage(msg) {
     return syncLiveBadge();
   }
   if (msg.t === 'error') return toast(msg.error, 4000);
+  if (msg.t === 'sync-request') {
+    // The Sync button on the computer.
+    toast('Syncing with the computer…', 0);
+    sync?.syncAll().then(
+      (n) => {
+        ws.send({ t: 'sync-done', ok: true, notebooks: n });
+        toast(`Synced ${n} notebook${n === 1 ? '' : 's'}`);
+      },
+      (e) => {
+        ws.send({ t: 'sync-done', ok: false, notebooks: 0, error: e.message });
+        toast('Sync failed: ' + e.message, 5000);
+      },
+    );
+    return;
+  }
   if (msg.t === 'live') return onLiveMessage(msg);
   if (msg.t === 'state') {
     live.peers = msg;
@@ -935,7 +950,7 @@ $('#m-rename').onclick = async () => {
   if (!title) return;
   current.title = title.slice(0, 120);
   current.metaT = now();
-  onop({ t: 'merge', nb: { id: current.id, title: current.title, size: current.size, metaT: current.metaT, goneP: [], pages: {} } }, { structural: true });
+  onop({ t: 'merge', nb: { id: current.id, title: current.title, size: current.size, folder: current.folder ?? '', metaT: current.metaT, goneP: [], pages: {} } }, { structural: true });
   document.title = `${current.title} · OpenPad`;
 };
 $('#m-settings').onclick = openSettings;

@@ -96,11 +96,12 @@ public struct Page: Codable, Equatable, Sendable {
     public var paper: String
     public var bg: Background?
     public var pt: [Double]
+    public var title: String  // optional page title ("" for none)
     public var strokes: [Stroke]
     public var gone: [String]
 
     public init(id: String, t: Int64, sec: String, h: Double, paper: String, bg: Background? = nil, pt: [Double],
-                strokes: [Stroke] = [], gone: [String] = []) {
+                title: String = "", strokes: [Stroke] = [], gone: [String] = []) {
         self.id = id
         self.t = t
         self.sec = sec
@@ -109,11 +110,12 @@ public struct Page: Codable, Equatable, Sendable {
         self.paper = paper
         self.bg = bg
         self.pt = pt
+        self.title = title
         self.strokes = strokes
         self.gone = gone
     }
 
-    enum CodingKeys: String, CodingKey { case id, t, sec, w, h, paper, bg, pt, strokes, gone }
+    enum CodingKeys: String, CodingKey { case id, t, sec, w, h, paper, bg, pt, title, strokes, gone }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -125,6 +127,7 @@ public struct Page: Codable, Equatable, Sendable {
         paper = try c.decodeIfPresent(String.self, forKey: .paper) ?? "blank"
         bg = try c.decodeIfPresent(Background.self, forKey: .bg)
         pt = try c.decodeIfPresent([Double].self, forKey: .pt) ?? [612, 792]
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         strokes = try c.decodeIfPresent([Stroke].self, forKey: .strokes) ?? []
         gone = try c.decodeIfPresent([String].self, forKey: .gone) ?? []
     }
@@ -139,6 +142,7 @@ public struct Page: Codable, Equatable, Sendable {
         try c.encode(paper, forKey: .paper)
         try c.encode(bg, forKey: .bg)  // null when there's none
         try c.encode(pt, forKey: .pt)
+        try c.encode(title, forKey: .title)
         try c.encode(strokes, forKey: .strokes)
         try c.encode(gone, forKey: .gone)
     }
@@ -156,11 +160,13 @@ public struct Section: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String
     public var pages: [String]
+    public var color: String?  // #rrggbb tab color, if set
 
-    public init(id: String, title: String, pages: [String]) {
+    public init(id: String, title: String, pages: [String], color: String? = nil) {
         self.id = id
         self.title = title
         self.pages = pages
+        self.color = color
     }
 }
 
@@ -187,17 +193,19 @@ public struct Notebook: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String
     public var size: String
+    public var folder: String  // where it's filed, e.g. "2025 Fall" ("" = top level)
     public var metaT: Int64
     public var created: Int64
     public var layout: Layout
     public var goneP: [String]
     public var pages: [String: Page]
 
-    public init(id: String, title: String, size: String, metaT: Int64, created: Int64, layout: Layout,
+    public init(id: String, title: String, size: String, folder: String = "", metaT: Int64, created: Int64, layout: Layout,
                 goneP: [String] = [], pages: [String: Page]) {
         self.id = id
         self.title = title
         self.size = size
+        self.folder = folder
         self.metaT = metaT
         self.created = created
         self.layout = layout
@@ -205,7 +213,7 @@ public struct Notebook: Codable, Equatable, Sendable, Identifiable {
         self.pages = pages
     }
 
-    enum CodingKeys: String, CodingKey { case v, id, title, size, metaT, created, layout, goneP, pages }
+    enum CodingKeys: String, CodingKey { case v, id, title, size, folder, metaT, created, layout, goneP, pages }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -213,6 +221,7 @@ public struct Notebook: Codable, Equatable, Sendable, Identifiable {
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? "Untitled notebook"
         let s = try c.decodeIfPresent(String.self, forKey: .size) ?? "letter"
         size = PageSize(rawValue: s) == nil ? "letter" : s
+        folder = try c.decodeIfPresent(String.self, forKey: .folder) ?? ""
         metaT = try decodeStamp(c, .metaT)
         created = try decodeStamp(c, .created)
         layout = try c.decodeIfPresent(Layout.self, forKey: .layout) ?? Layout(t: 0, sections: [])

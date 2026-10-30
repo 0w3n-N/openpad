@@ -44,6 +44,20 @@
   </div>
 </section>
 
+<section id="syncpanel" class="overlay" hidden>
+  <div class="card wide">
+    <h1>Sync</h1>
+    <p>The iPad keeps your notebooks. This computer keeps a complete copy, with a readable PDF for every section, in this folder:</p>
+    <form id="syncform" class="row-form">
+      <input id="syncfolder" autocomplete="off" spellcheck="false" aria-label="Sync folder">
+      <button type="submit">Use folder</button>
+    </form>
+    <p class="small" id="syncinfo"></p>
+    <div class="actions"><button id="syncnow" class="primary-btn">Sync now</button></div>
+    <p class="small">OpenPad must be open on the iPad (same Wi-Fi). While it's connected, it also syncs by itself.</p>
+  </div>
+</section>
+
 <section id="capture-prompt" hidden>
   <div class="card">
     <h1>Show a window on the iPad</h1>
@@ -68,6 +82,7 @@
   <span class="sep"></span>
   <button id="b-live" title="Annotate a desktop window (W)">Window</button>
   <button id="b-guests" title="Invite people (I)">Invite</button>
+  <button id="b-sync" title="Sync the iPad to this computer (Y)">Sync</button>
   <button id="b-qr" title="Pair an iPad (Q)">Pair</button>
   <button id="b-pdf" title="Add a PDF (O)">PDF</button>
   <button id="b-export" title="Save as PDF (S)">Save</button>

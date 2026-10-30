@@ -234,10 +234,12 @@ export async function importAsset(bytes, type) {
   return sha;
 }
 
-const sectionDigest = (nb, sec) => sec.title + '|' + sec.pages.map((id) => {
+// Identifies a section's content, so its readable PDF is only rebuilt when it
+// changed. The computer keeps the last one it got (/api/sync "pdfs").
+const sectionDigest = async (nb, sec) => (await sha256Hex(new TextEncoder().encode(nb.title + '|' + sec.title + '|' + sec.pages.map((id) => {
   const p = nb.pages[id];
   return `${id}:${p.t}:${p.strokes.length}:${p.strokes.reduce((n, s) => n + s.pts.length, 0)}:${p.gone.length}`;
-}).join(',');
+}).join(',')))).slice(0, 32);
 
 export class Sync {
   constructor(link, { onstatus, onchanged, backgrounds, busy }) {
@@ -251,10 +253,12 @@ export class Sync {
     this.state = 'idle';
     this.lastOk = 0;
     this.pdfQueue = new Map(); // nb id -> due time
+    this.serverPdfs = {}; // nb id -> {section id: digest} the computer has
   }
 
   status(state, detail = '') {
     this.state = state;
+    this.detail = detail;
     this.onstatus(state, detail);
   }
 
@@ -285,6 +289,7 @@ export class Sync {
   async #pass(only) {
     this.status('syncing');
     const remote = await this.link.api('/api/sync');
+    this.serverPdfs = remote.pdfs || {};
     const local = await store.listNotebooks();
     const remoteById = new Map(remote.notebooks.map((n) => [n.id, n]));
     const localIds = new Set(local.map((n) => n.id));
@@ -383,9 +388,9 @@ export class Sync {
       this.pdfQueue.delete(id);
       const nb = await store.loadNotebook(id);
       if (!nb) continue;
-      const done = (await store.kvGet(`pdf:${id}`)) || {};
+      const done = (this.serverPdfs[id] ??= {});
       for (const sec of nb.layout.sections) {
-        const d = sectionDigest(nb, sec);
+        const d = await sectionDigest(nb, sec);
         if (done[sec.id] === d || !sec.pages.length) continue;
         if (!force && this.busy()) {
           this.queuePDF(id, 5000);
@@ -393,15 +398,23 @@ export class Sync {
         }
         const pages = sec.pages.map((pid) => nb.pages[pid]);
         const blob = await buildPDF(pages, { backgrounds: this.backgrounds, title: `${nb.title} – ${sec.title}` });
-        await this.link.api(`/api/sync/pdf/${id}/${sec.id}`, { method: 'PUT', body: blob });
+        await this.link.api(`/api/sync/pdf/${id}/${sec.id}`, { method: 'PUT', body: blob, headers: { 'X-OpenPad-Digest': d } });
         done[sec.id] = d;
-        await store.kvSet(`pdf:${id}`, done);
       }
     }
   }
 
   flushPDFs() {
     return this.#pdfs(true).catch(() => {});
+  }
+
+  // The computer's Sync button: everything, readable PDFs included.
+  async syncAll() {
+    await this.run();
+    if (this.state !== 'ok') throw new Error(this.detail || 'The computer is not reachable');
+    for (const n of await store.listNotebooks()) if (!n.deleted) this.queuePDF(n.id, 0);
+    await this.#pdfs(true);
+    return (await store.listNotebooks()).filter((n) => !n.deleted).length;
   }
 
   tickPDFs() {

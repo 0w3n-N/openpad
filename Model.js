@@ -16,7 +16,7 @@ function toInt(value, lo, hi, fallback) {
 
 // status.json written by the server (see openpad/server.py write_status).
 function parseStatus(raw, nowSec) {
-  var empty = { running: false, pads: 0, views: 0, guests: 0, notebook: "", internet: false, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0, live: "idle" }
+  var empty = { running: false, pads: 0, views: 0, guests: 0, notebook: "", internet: false, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0, live: "idle", syncFolder: "", lastSync: null }
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 200000) return empty
   var s
   try { s = JSON.parse(raw) } catch (e) { return empty }
@@ -39,6 +39,13 @@ function parseStatus(raw, nowSec) {
     pads: toInt(s.pads, 0, 99, 0),
     views: toInt(s.views, 0, 99, 0),
     guests: toInt(s.guests, 0, 99, 0),
+    syncFolder: singleLine(s.syncFolder, 300),
+    lastSync: s.lastSync && typeof s.lastSync === "object" ? {
+      time: toInt(s.lastSync.time, 0, 9999999999, 0),
+      ok: s.lastSync.ok === true,
+      notebooks: toInt(s.lastSync.notebooks, 0, 100000, 0),
+      error: singleLine(s.lastSync.error, 200)
+    } : null,
     notebook: singleLine(s.notebook, 80),
     internet: typeof s.internet === "string" && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(s.internet),
     url: url,
@@ -85,6 +92,17 @@ function detailLine(st) {
   parts.push(st.pages === 1 ? "1 page" : st.pages + " pages")
   parts.push(st.views === 1 ? "1 window open" : st.views + " windows open")
   return parts.join(" · ")
+}
+
+// "Synced 5 min ago · ~/Documents/OpenPad"
+function syncLine(st, nowSec) {
+  var folder = String(st.syncFolder || "").replace(/^\/home\/[^/]+/, "~")
+  var last = st.lastSync
+  if (!last || !last.time) return folder ? "Copies everything to " + folder : "Copy every notebook to this computer"
+  if (!last.ok) return "Last sync failed: " + last.error
+  var mins = Math.max(0, Math.round((nowSec - last.time) / 60))
+  var ago = mins < 1 ? "just now" : mins < 60 ? mins + " min ago" : mins < 1440 ? Math.round(mins / 60) + " h ago" : Math.round(mins / 1440) + " d ago"
+  return "Synced " + ago + (folder ? " · " + folder : "")
 }
 
 // Quote one argument for the floating-terminal launcher, which runs `bash -c`.

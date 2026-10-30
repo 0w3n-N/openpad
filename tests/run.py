@@ -544,6 +544,68 @@ res = json.loads(http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "applica
 check("a deleted notebook stays deleted (another device can't bring it back)", code == 200 and "deleted" in res)
 check("its folder moves to the trash", not os.path.exists(os.path.dirname(out)))
 
+print("== the sync folder (a copy of everything)")
+NOTES = os.path.join(TMP, "notes")
+sig = nb_with(2, "Signals")
+sig.update(folder="2025 Fall/ECE 210", metaT=N.now_ms())
+pdf4 = tiny_pdf(1)
+sha4 = hashlib.sha256(pdf4).hexdigest()
+sp1 = N.order(sig)[0]
+sig["pages"][sp1].update(bg={"pdf": sha4, "n": 1}, t=N.now_ms(), title="Fourier series")
+http("PUT", f"/api/asset/{sha4}?k={KEY}", body=pdf4)
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(sig).encode())
+srv.update_mirror(force=True)
+base = os.path.join(NOTES, "2025 Fall", "ECE 210", "Signals")
+copy = os.path.join(base, ".openpad", "notebook.json")
+check("notebooks are copied into their folders", os.path.isfile(copy) and json.load(open(copy))["title"] == "Signals"
+      and json.load(open(copy))["pages"][sp1]["title"] == "Fourier series", base)
+check("with the PDFs and images their pages show", open(os.path.join(base, ".openpad", "files", sha4 + ".pdf"), "rb").read() == pdf4)
+check("the copy is owner-only", mode(base) == 0o700 and mode(os.path.join(NOTES, "2025 Fall")) == 0o700 and mode(copy) == 0o600)
+ssec = sig["layout"]["sections"][0]["id"]
+http("PUT", f"/api/sync/pdf/{sig['id']}/{ssec}?k={KEY}", {"X-OpenPad-Digest": "0123abcd0123abcd"}, pdf4)
+pdfs = json.loads(http("GET", f"/api/sync?k={KEY}")[2])["pdfs"]
+check("the computer tells devices which section PDFs are current", pdfs.get(sig["id"], {}).get(ssec) == "0123abcd0123abcd")
+sig.update(folder="Archive", title="Signals & Systems", metaT=N.now_ms() + 5)
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(sig).encode())
+srv.update_mirror(force=True)
+moved = os.path.join(NOTES, "Archive", "Signals & Systems")
+check("renaming or refiling a notebook moves its folder, PDFs included",
+      os.path.isfile(os.path.join(moved, ".openpad", "notebook.json")) and os.path.isfile(os.path.join(moved, "Lecture 1.pdf"))
+      and not os.path.exists(base) and not os.path.exists(os.path.join(NOTES, "2025 Fall")), os.listdir(NOTES))
+evil = nb_with(1, "../../escape")
+evil.update(folder="../../../etc/x", metaT=N.now_ms())
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(evil).encode())
+srv.update_mirror(force=True)
+inside = all(os.path.realpath(os.path.join(d, f)).startswith(os.path.realpath(NOTES) + os.sep)
+             for d, _, fs in os.walk(NOTES) for f in fs)
+check("folder and notebook names can't escape the sync folder", inside and not os.path.exists(os.path.join(TMP, "etc")))
+check("choosing the sync folder needs the key", http("POST", "/api/settings", body=b'{"syncFolder":"/tmp/x"}')[0] == 403)
+for bad in ("relative/path", "/", DATA, os.path.dirname(DATA), os.path.expanduser("~")):
+    code, _, body = http("POST", f"/api/settings?k={KEY}", {"Content-Type": "application/json"}, json.dumps({"syncFolder": bad}).encode())
+    check(f"refuses {bad!r} as the sync folder", code == 400, body)
+NOTES2 = os.path.join(TMP, "notes2")
+code, _, body = http("POST", f"/api/settings?k={KEY}", {"Content-Type": "application/json"}, json.dumps({"syncFolder": NOTES2}).encode())
+srv.update_mirror(force=True)
+check("a new sync folder gets a fresh copy of everything", code == 200 and json.loads(body)["syncFolder"] == NOTES2
+      and os.path.isfile(os.path.join(NOTES2, "Archive", "Signals & Systems", ".openpad", "notebook.json")), body)
+check("and devices are asked to send the readable PDFs again",
+      not any(json.loads(http("GET", f"/api/sync?k={KEY}")[2])["pdfs"].values()))
+check("the old folder is left alone", os.path.isfile(os.path.join(moved, "Lecture 1.pdf")))
+check("the choice is remembered", json.load(open(os.path.join(DATA, "config.json")))["syncFolder"] == NOTES2)
+os.environ.pop("OPENPAD_NOTES", None)
+
+print("== the computer's Sync button")
+res = json.loads(http("POST", f"/api/sync/request?k={KEY}")[2])
+check("Sync asks the connected iPad to sync", res["pads"] >= 1 and recv_until(pad, "sync-request").get("t") == "sync-request", res)
+send(pad, {"t": "sync-done", "ok": True, "notebooks": 3})
+m = recv_until(view, "sync-done")
+time.sleep(0.3)
+last = json.loads(http("GET", f"/api/info?k={KEY}")[2])["lastSync"]
+check("its report reaches the share window and the bar widget", m.get("notebooks") == 3 and last["ok"] and last["notebooks"] == 3)
+send(view, {"t": "sync-done", "ok": False, "notebooks": 99})
+time.sleep(0.3)
+check("only the iPad app can report a sync", json.loads(http("GET", f"/api/info?k={KEY}")[2])["lastSync"]["notebooks"] == 3)
+
 # --------------------------------------------------------------------------- guests
 
 print("== guests")
@@ -561,6 +623,22 @@ check("view-only guests' ink is ignored", "v1" not in srv.hub.strokes)
 send(gw, {"t": "begin", "page": pid, "s": stroke("g1", by="gsomeoneelse")})
 m = recv_until(pad, "begin")
 check("guest ink is tagged with the guest's id", m["s"]["id"] == "g1" and m["s"].get("by") == "galice1", m)
+send(pad, {"t": "preview", "page": pid, "id": "pv1", "pts": [[1, 2, 0.5], ["x"]], "color": "red", "width": 999, "tool": "<b>"})
+m = recv_until(gw, "preview")
+check("a stroke still being drawn on the iPad is shown live", m.get("pts") == [[1, 2, 0.5]] and m.get("color") == "#111111"
+      and m.get("width") == 80 and m.get("tool") == "pen", m)
+check("and not stored", "pv1" not in srv.hub.strokes)
+send(gw, {"t": "preview", "page": pid, "id": "pv2", "pts": [[1, 2, 0.5]]})
+time.sleep(0.3)
+got = []
+pad.settimeout(0.5)
+try:
+    while True:
+        kind, m = recv_any(pad, 0.5)
+        got.append(m)
+except (OSError, ConnectionError):
+    pass
+check("guests can't send previews", not any(isinstance(x, dict) and x.get("t") == "preview" for x in got))
 send(gw, {"t": "pts", "id": sid, "pts": [[5, 5, 0.5]]})
 send(gw, {"t": "remove", "page": pid, "ids": [sid]})
 time.sleep(0.3)

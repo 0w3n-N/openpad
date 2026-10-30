@@ -59,11 +59,11 @@ func mergePage(_ a: Page, _ b: Page) -> Page {
 /// Merge two copies of the same notebook. Order doesn't matter, and merging a
 /// copy into itself changes nothing.
 public func merge(_ a: Notebook, _ b: Notebook) -> Notebook {
-    let aMeta = (a.metaT, a.title, a.size), bMeta = (b.metaT, b.title, b.size)
     let metaFromA: Bool = {
-        if aMeta.0 != bMeta.0 { return aMeta.0 > bMeta.0 }
-        if aMeta.1 != bMeta.1 { return !codepointLess(aMeta.1, bMeta.1) }
-        return !codepointLess(aMeta.2, bMeta.2)
+        if a.metaT != b.metaT { return a.metaT > b.metaT }
+        if a.title != b.title { return !codepointLess(a.title, b.title) }
+        if a.size != b.size { return !codepointLess(a.size, b.size) }
+        return !codepointLess(a.folder, b.folder)
     }()
     let meta = metaFromA ? a : b
     let created = [a.created, b.created].filter { $0 != 0 }
@@ -77,7 +77,7 @@ public func merge(_ a: Notebook, _ b: Notebook) -> Notebook {
         default: break
         }
     }
-    var out = Notebook(id: a.id, title: meta.title, size: meta.size, metaT: meta.metaT,
+    var out = Notebook(id: a.id, title: meta.title, size: meta.size, folder: meta.folder, metaT: meta.metaT,
                        created: created.min() ?? 0,
                        layout: compare(layoutKey(a.layout), layoutKey(b.layout)) >= 0 ? a.layout : b.layout,
                        goneP: sortedIDs(goneP), pages: pages)
@@ -97,7 +97,7 @@ public func finish(_ input: Notebook) -> Notebook {
         // Exactly as notebook.py: `seen` grows after each whole section.
         let pages = s.pages.filter { alive.contains($0) && !seen.contains($0) }
         seen.formUnion(pages)
-        return Section(id: s.id, title: s.title, pages: pages)
+        return Section(id: s.id, title: s.title, pages: pages, color: s.color)
     }
     if sections.isEmpty { sections = [Section(id: "main", title: "Notes", pages: [])] }
     for id in sortedIDs(alive.subtracting(seen)) {

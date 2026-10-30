@@ -48,7 +48,7 @@ Panel {
   readonly property color barIconColor: live ? Color.accent : (st.running ? barForeground : Qt.darker(barForeground, 1.55))
 
   // Rows the keyboard cursor walks, top to bottom.
-  readonly property var rows: st.running ? ["open", "invite", "annotate", "mirror", "setup"] : ["start", "invite", "annotate", "mirror", "setup"]
+  readonly property var rows: st.running ? ["open", "sync", "invite", "annotate", "mirror", "setup"] : ["start", "sync", "invite", "annotate", "mirror", "setup"]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -77,6 +77,11 @@ Panel {
 
   function openWindow() {
     runCli("open")
+  }
+
+  function syncNow() {
+    var folder = String(setting("syncFolder", "") || "").trim()
+    runCli("sync", folder !== "" ? ["--folder", folder] : [])
   }
 
   function invite() {
@@ -117,6 +122,7 @@ Panel {
     if (name === "start") toggleServer()
     else if (name === "open") openWindow()
     else if (name === "invite") invite()
+    else if (name === "sync") syncNow()
     else if (name === "annotate") toggleAnnotate()
     else if (name === "mirror") toggleMirror()
     else if (name === "setup") runSetup()
@@ -224,6 +230,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function board(): void { root.openWindow() }
     function invite(): void { root.invite() }
+    function sync(): void { root.syncNow() }
     function start(): void { if (!root.st.running) root.toggleServer() }
     function stop(): void { if (root.st.running) root.toggleServer() }
     function mirror(): void { root.toggleMirror() }
@@ -416,6 +423,14 @@ Panel {
             ? "A clean window to share in Zoom, Teams or Meet"
             : "Then scan the QR code with your iPad"
           onActivated: root.st.running ? root.openWindow() : root.toggleServer()
+        }
+
+        ActionRow {
+          name: "sync"
+          glyph: "󰓦"
+          title: root.pendingAction === "sync" ? "Syncing the iPad…" : "Sync iPad"
+          subtitle: Model.syncLine(root.st, root.nowSec)
+          onActivated: root.syncNow()
         }
 
         ActionRow {

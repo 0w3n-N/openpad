@@ -595,3 +595,22 @@ html, body, button, a { touch-action: manipulation; }
   #bar #followbtn, #bar #savebtn { padding: 0 8px; }
   #bar .group { padding: 0 2px; }
 }
+
+/* ------------------------------------------------------------------ sync panel */
+
+.row-form { display: flex; gap: 8px; margin: 0 0 8px; }
+.row-form input {
+  flex: 1;
+  min-width: 0;
+  font: 13px ui-monospace, "JetBrains Mono", monospace;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.row-form button, .primary-btn { padding: 8px 14px; border-radius: var(--radius); border: 1px solid var(--line); }
+.primary-btn { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+#syncpanel p { text-align: left; }

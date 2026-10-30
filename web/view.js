@@ -1,7 +1,7 @@
 // The share window: the live notebook, big and clean for Zoom/Teams/Meet.
 // Opened by the computer (bar icon or `openpad`), never by a link.
 
-import { Backgrounds, Surface, buildPDF, pdfInfo, pdfName, savePDF } from './ink.js';
+import { Backgrounds, Surface, buildPDF, drawStroke, pdfInfo, pdfName, savePDF } from './ink.js';
 import { PROTOCOL, socket } from './link.js';
 import { applyOp, indexStrokes, mergeInto, normalize, order, sectionOf, sha256Hex } from './model.js';
 
@@ -69,6 +69,7 @@ let idx = new Map();
 let pid = null;
 let pads = 0;
 let placeholder = false; // nothing on screen yet
+const previews = new Map(); // strokes still being drawn on the iPad: id -> {page, pts, color, width, tool, t}
 let pairForced = null; // null = automatic, true/false = user toggled
 let cursor = null; // {page, x, y}
 
@@ -138,6 +139,23 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       return syncPair();
     }
     if (!nb) return;
+    if (msg.t === 'sync-done') {
+      lastSync = msg;
+      renderSync();
+      return toast(msg.ok ? `Synced ${msg.notebooks} notebook${msg.notebooks === 1 ? '' : 's'} from the iPad` : `Sync failed: ${msg.error || 'unknown error'}`, 4000);
+    }
+    if (msg.t === 'preview') {
+      const p = previews.get(msg.id) || { page: msg.page, pts: [], color: msg.color, width: msg.width, tool: msg.tool };
+      if (msg.end) previews.delete(msg.id);
+      else {
+        p.pts.push(...msg.pts);
+        p.t = Date.now();
+        previews.set(msg.id, p);
+        const last = msg.pts[msg.pts.length - 1];
+        if (last && p.page === pid) keepInView(last[0], last[1]);
+      }
+      return surface.queueLive();
+    }
     if (msg.t === 'cursor') {
       cursor = msg.hide ? null : { page: msg.page, x: msg.x, y: msg.y };
       if (cursor && cursor.page === pid) keepInView(cursor.x, cursor.y);
@@ -179,8 +197,13 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
   },
 });
 
-// Pen tip / hover cursor so viewers can follow along.
+// Pen tip / hover cursor so viewers can follow along, and strokes the iPad
+// is still drawing.
 surface.overlay = (ctx, k) => {
+  for (const [id, p] of previews) {
+    if (Date.now() - p.t > 4000) previews.delete(id);
+    else if (p.page === pid) drawStroke(ctx, { ...p, id }, k);
+  }
   let at = null;
   for (const s of surface.active.values()) {
     const p = s.pts[s.pts.length - 1];
@@ -430,6 +453,44 @@ $('#gnet').onclick = () => guestAction($('#guests').dataset.net === 'on' || $('#
 $('#grotate').onclick = () => confirm('Make new links? Everyone using the current ones is disconnected.') && guestAction('rotate');
 $('#guests').onclick = (e) => e.target === $('#guests') && toggleGuests();
 
+// ---------------------------------------------------------------- sync
+
+let lastSync = null;
+function when(t) {
+  if (!t) return 'never';
+  const s = Math.round(Date.now() / 1000 - t);
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : new Date(t * 1000).toLocaleString();
+}
+function renderSync() {
+  $('#syncinfo').textContent = lastSync
+    ? `Last sync: ${when(lastSync.time)}${lastSync.ok ? `, ${lastSync.notebooks} notebook${lastSync.notebooks === 1 ? '' : 's'}` : ` (failed: ${lastSync.error || 'unknown error'})`}`
+    : 'Not synced yet.';
+}
+async function toggleSync() {
+  const el = $('#syncpanel');
+  el.hidden = !el.hidden;
+  if (el.hidden) return;
+  $('#pair').hidden = true;
+  $('#guests').hidden = true;
+  const info = await (await api('/api/info')).json();
+  $('#syncfolder').value = info.syncFolder;
+  lastSync = info.lastSync;
+  renderSync();
+}
+$('#syncform').onsubmit = async (e) => {
+  e.preventDefault();
+  const r = await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ syncFolder: $('#syncfolder').value }) });
+  const j = await r.json();
+  if (!r.ok) return toast(j.error || 'Could not use that folder', 5000);
+  $('#syncfolder').value = j.syncFolder;
+  toast('Folder saved. Notebooks are copied there on the next sync.', 4000);
+};
+$('#syncnow').onclick = async () => {
+  const r = await (await api('/api/sync/request', { method: 'POST' })).json();
+  toast(r.pads ? 'Asked the iPad to sync…' : 'No iPad is connected. Open OpenPad on the iPad (same Wi-Fi), then try again.', r.pads ? 0 : 5000);
+};
+$('#syncpanel').onclick = (e) => e.target === $('#syncpanel') && toggleSync();
+
 // ---------------------------------------------------------------- controls
 
 let toastTimer = 0;
@@ -619,6 +680,7 @@ $('#b-zoom').onclick = resetZoom;
 $('#b-follow').onclick = toggleFollow;
 $('#b-qr').onclick = togglePair;
 $('#b-guests').onclick = toggleGuests;
+$('#b-sync').onclick = toggleSync;
 $('#b-live').onclick = toggleLive;
 $('#b-choose').onclick = startSource;
 $('#b-choose-cancel').onclick = () => ($('#capture-prompt').hidden = true);
@@ -638,6 +700,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k === 'q') togglePair();
   else if (k === 'i') toggleGuests();
+  else if (k === 'y') toggleSync();
   else if (k === 'f') fullscreen();
   else if (k === 'o') $('#file').click();
   else if (k === 's') save();
@@ -650,6 +713,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'arrowleft' || k === 'pageup') gotoPage(-1);
   else if (k === 'escape' && !$('#capture-prompt').hidden) $('#capture-prompt').hidden = true;
   else if (k === 'escape' && !$('#guests').hidden) toggleGuests();
+  else if (k === 'escape' && !$('#syncpanel').hidden) toggleSync();
   else if (k === 'escape' && !$('#pair').hidden) togglePair();
   else return;
   e.preventDefault();

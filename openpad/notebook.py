@@ -144,7 +144,15 @@ def clean_meta(p):
         "paper": p.get("paper") if p.get("paper") in PAPERS else "blank",
         "bg": clean_bg(p.get("bg")),
         "pt": [round(pt[0], 2), round(pt[1], 2)],
+        "title": clean_text(p.get("title"), "", 120),
     }
+
+
+def clean_folder(v):
+    """Where a notebook is filed, e.g. "2025 Fall" or "Archive/2024": up to four
+    levels of names. Empty means the top level."""
+    parts = [clean_text(seg, "", 60).strip(" .") for seg in str(v or "").replace("\\", "/").split("/")]
+    return "/".join([seg for seg in parts if seg][:4])
 
 
 def clean_page(p, pid=None):
@@ -179,7 +187,10 @@ def clean_layout(layout):
             if clean_id(pid) and pid not in seen_p:
                 seen_p.add(pid)
                 pages.append(pid)
-        secs.append({"id": s["id"], "title": clean_text(s.get("title"), "Section", 80), "pages": pages})
+        sec = {"id": s["id"], "title": clean_text(s.get("title"), "Section", 80), "pages": pages}
+        if isinstance(s.get("color"), str) and COLOR_RE.match(s["color"]):
+            sec["color"] = s["color"].lower()
+        secs.append(sec)
     return {"t": stamp(layout.get("t")), "sections": secs}
 
 
@@ -200,6 +211,7 @@ def clean_notebook(nb, partial=False):
         "id": nb["id"],
         "title": clean_text(nb.get("title"), "Untitled notebook", 120),
         "size": nb.get("size") if nb.get("size") in SIZES else "letter",
+        "folder": clean_folder(nb.get("folder")),
         "metaT": stamp(nb.get("metaT")),
         "created": stamp(nb.get("created")),
         "layout": clean_layout(nb.get("layout")),
@@ -207,7 +219,7 @@ def clean_notebook(nb, partial=False):
         "pages": pages,
     }
     if partial:
-        if "title" not in nb and "size" not in nb:
+        if "title" not in nb and "size" not in nb and "folder" not in nb:
             out["metaT"] = 0
         if "layout" not in nb:
             out["layout"] = {"t": 0, "sections": []}
@@ -238,6 +250,7 @@ def _merge_page(a, b):
         if old is None or len(s["pts"]) > len(old["pts"]):
             strokes[s["id"]] = s  # mid-stroke copies: keep the longer one
     out = {k: meta[k] for k in ("t", "sec", "w", "h", "paper", "bg", "pt")}
+    out["title"] = meta.get("title", "")
     out["id"] = a["id"]
     out["strokes"] = sorted(strokes.values(), key=lambda s: (s["z"], s["id"]))[:MAX_STROKES_PER_PAGE]
     out["gone"] = sorted(gone)[:MAX_GONE_PER_PAGE]
@@ -252,8 +265,10 @@ def merge(a, b):
     if b is None:
         return a
     out = {"v": 1, "id": a["id"]}
-    meta = a if (a["metaT"], a["title"], a["size"]) >= (b["metaT"], b["title"], b["size"]) else b
-    out["title"], out["size"], out["metaT"] = meta["title"], meta["size"], meta["metaT"]
+    ka = (a["metaT"], a["title"], a["size"], a.get("folder", ""))
+    kb = (b["metaT"], b["title"], b["size"], b.get("folder", ""))
+    meta = a if ka >= kb else b
+    out["title"], out["size"], out["folder"], out["metaT"] = meta["title"], meta["size"], meta.get("folder", ""), meta["metaT"]
     created = [c for c in (a["created"], b["created"]) if c]
     out["created"] = min(created) if created else 0
     la, lb = a["layout"], b["layout"]
@@ -280,7 +295,7 @@ def finish(nb):
     for s in nb["layout"]["sections"]:
         pages = [pid for pid in s["pages"] if pid in alive and pid not in seen]
         seen.update(pages)
-        sections.append({"id": s["id"], "title": s["title"], "pages": pages})
+        sections.append({"id": s["id"], "title": s["title"], "pages": pages, **({"color": s["color"]} if s.get("color") else {})})
     if not sections:
         sections = [{"id": "main", "title": "Notes", "pages": []}]
     by_id = {s["id"]: s for s in sections}
@@ -322,14 +337,14 @@ def assets(nb) -> set[str]:
 def blank_page(sec, size="letter", paper="lines", t=None):
     h, pt = SIZES.get(size, SIZES["letter"])
     return {"id": new_id(), "t": t or now_ms(), "sec": sec, "w": PAGE_W, "h": h, "paper": paper,
-            "bg": None, "pt": list(pt), "strokes": [], "gone": []}
+            "bg": None, "pt": list(pt), "title": "", "strokes": [], "gone": []}
 
 
 def new_notebook(title="Notebook", size="letter", section="Notes", paper="lines"):
     t = now_ms()
     sec = new_id()
     page = blank_page(sec, size, paper, t)
-    return finish({"v": 1, "id": new_id(), "title": title, "size": size, "metaT": t, "created": t,
+    return finish({"v": 1, "id": new_id(), "title": title, "size": size, "folder": "", "metaT": t, "created": t,
                    "layout": {"t": t, "sections": [{"id": sec, "title": section, "pages": [page["id"]]}]},
                    "goneP": [], "pages": {page["id"]: page}})
 

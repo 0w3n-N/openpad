@@ -12,6 +12,8 @@ final class MergeTests: XCTestCase {
             let digest: String
             let order: [String]
             let title: String
+            let folder: String
+            let colors: [String]
             let goneP: [String]
             let pages: [String: ExpectPage]
         }
@@ -21,6 +23,7 @@ final class MergeTests: XCTestCase {
             let paper: String
             let bg: Background?
             let t: Int64
+            let title: String
         }
         let cases: [Case]
     }
@@ -38,6 +41,8 @@ final class MergeTests: XCTestCase {
                 XCTAssertEqual(digest(m), c.expect.digest, "case \(i): digest")
                 XCTAssertEqual(m.order, c.expect.order, "case \(i): order")
                 XCTAssertEqual(m.title, c.expect.title, "case \(i): title")
+                XCTAssertEqual(m.folder, c.expect.folder, "case \(i): folder")
+                XCTAssertEqual(m.layout.sections.map { $0.color ?? "" }, c.expect.colors, "case \(i): section colors")
                 XCTAssertEqual(m.goneP, c.expect.goneP, "case \(i): deleted pages")
                 XCTAssertEqual(Set(m.pages.keys), Set(c.expect.pages.keys), "case \(i): pages")
                 for (id, want) in c.expect.pages {
@@ -47,6 +52,7 @@ final class MergeTests: XCTestCase {
                     XCTAssertEqual(p.paper, want.paper, "case \(i) page \(id): paper")
                     XCTAssertEqual(p.bg, want.bg, "case \(i) page \(id): background")
                     XCTAssertEqual(p.t, want.t, "case \(i) page \(id): t")
+                    XCTAssertEqual(p.title, want.title, "case \(i) page \(id): title")
                 }
             }
         }

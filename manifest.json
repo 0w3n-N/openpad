@@ -28,14 +28,15 @@
   },
   "barWidget": {
     "displayName": "OpenPad",
-    "description": "Start OpenPad, pair the iPad, open the share window, invite people, annotate a desktop window, and toggle AirPlay mirroring.",
+    "description": "Start OpenPad, pair the iPad, sync it to a folder, open the share window, invite people, annotate a desktop window, and toggle AirPlay mirroring.",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "port": 8770,
       "airplayName": "Omarchy",
-      "airplayAudio": "on"
+      "airplayAudio": "on",
+      "syncFolder": ""
     },
     "schema": [
       {
@@ -46,6 +47,12 @@
         "max": 65535,
         "step": 1,
         "defaultValue": 8770
+      },
+      {
+        "key": "syncFolder",
+        "type": "string",
+        "label": "Sync folder (empty: ~/Documents/OpenPad)",
+        "defaultValue": ""
       },
       {
         "key": "airplayName",
