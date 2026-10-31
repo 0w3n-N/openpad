@@ -4,6 +4,17 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.3 (2026-10-31)
+
+- **Security: a guest can't exhaust the computer's memory.** Anyone with a
+  guest link, even view-only, could send endless empty message fragments,
+  flood pings without reading the replies, or stop reading while the
+  notebook changed, and the server kept everything. Now fragments count
+  toward the message limit, ping replies don't pile up, and a client more
+  than 16 MiB behind is disconnected (it reconnects and gets the current
+  state). The fragment problem was found in the Omarchy plugin marketplace
+  review; the other two turned up while fixing it.
+
 ## 0.7.2 (2026-10-31)
 
 - **Security: guests can't pose as each other.** A guest with a "can draw"

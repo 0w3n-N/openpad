@@ -705,6 +705,73 @@ check("new links disconnect current guests", code == 200 and closed(gw) and clos
 check("old links stop working", ws(f"/ws?g={W}")[1] == 403 and srv.guests.check(W) is None)
 W = srv.guests.tokens["w"]
 
+print("== WebSocket limits (a guest can't exhaust the server's memory)")
+from openpad.server import MAX_WS_BACKLOG, WSConn  # noqa: E402
+
+
+def raw_frame(op, payload=b"", fin=True):
+    m, n = os.urandom(4), len(payload)
+    head = bytes([(0x80 if fin else 0) | op])
+    if n < 126:
+        head += bytes([0x80 | n])
+    elif n < 65536:
+        head += bytes([0x80 | 126]) + struct.pack("!H", n)
+    else:
+        head += bytes([0x80 | 127]) + struct.pack("!Q", n)
+    return head + m + bytes(b ^ m[i % 4] for i, b in enumerate(payload))
+
+
+def flood(path, data):
+    s, _ = ws(path)
+    recv_until(s, "state")
+    try:
+        s.sendall(data)
+    except OSError:
+        pass  # the server hung up part way: good
+    return s
+
+
+V = srv.guests.tokens["v"]
+g = flood(f"/ws?g={V}", raw_frame(0x1, b"", fin=False) + raw_frame(0x0, b"", fin=False) * 20000)
+check("endless empty fragments from a view-only guest end the connection", closed(g, 5))
+g = flood(f"/ws?g={V}", raw_frame(0x1, b"x", fin=False) + raw_frame(0x0, b"x", fin=False) * 20000)
+check("so do endless one-byte fragments", closed(g, 5))
+check("a ping split into fragments ends the connection", closed(flood(f"/ws?g={V}", raw_frame(0x9, b"hi", fin=False))))
+check("so does a ping over 125 bytes", closed(flood(f"/ws?g={V}", raw_frame(0x9, b"x" * 126))))
+before = {c.id for c in srv.hub.conns}
+g, _ = ws(f"/ws?g={V}")
+recv_until(g, "state")
+conn = next(c for c in srv.hub.conns if c.id not in before)
+g.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+ping = raw_frame(0x9, b"p" * 125)
+worst = 0
+for _ in range(40):
+    try:
+        g.sendall(ping * 2500)
+    except OSError:
+        break
+    worst = max(worst, conn.out.qsize())
+check("a ping flood that never reads the replies doesn't pile them up", worst <= 2, worst)
+g.close()
+msg = json.dumps({"t": "cursor", "page": srv.hub.page, "x": 7, "y": 8}).encode()
+view.sendall(raw_frame(0x1, msg[:10], fin=False) + raw_frame(0x9, b"hi") + raw_frame(0x0, msg[10:]))
+m = recv_until(pad, "cursor")
+check("a message in fragments, with a ping between them, still works", m.get("x") == 7, m)
+
+# A client that stops reading while the notebook keeps changing.
+a, b = socket.socketpair()
+a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+slow = WSConn(a, a.makefile("rb"), "guest")
+big = {"t": "state", "nb": "x" * (1024 * 1024)}
+t = threading.Thread(target=lambda: [slow.send(big) for _ in range(40)], daemon=True)
+t.start()
+t.join(10)
+check("a client that falls too far behind is disconnected, without blocking the sender",
+      not t.is_alive() and not slow.alive and slow.backlog <= MAX_WS_BACKLOG + 2 * 1024 * 1024, (t.is_alive(), slow.alive))
+a.close()
+b.close()
+
 print("== internet links (tunnel)")
 srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
 srv.tunnel.state = "on"

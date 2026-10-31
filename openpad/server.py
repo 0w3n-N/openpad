@@ -61,6 +61,12 @@ PLACEHOLDER = "nothing-shown"
 # exhaust memory, disk, or threads.
 MAX_WS_MESSAGE = 2 * 1024 * 1024
 MAX_GUEST_MESSAGE = 512 * 1024
+# What keeping one received frame costs beyond its payload. Counted toward the
+# message limit, so floods of tiny or empty fragments hit it quickly.
+WS_FRAME_COST = 64
+# Unsent data a client may fall behind by. Past it the client is disconnected;
+# it reconnects and gets the current state.
+MAX_WS_BACKLOG = 16 * 1024 * 1024
 MAX_NOTEBOOK_BYTES = 64 * 1024 * 1024
 MAX_SECTION_PDF = 400 * 1024 * 1024
 MAX_WS_CLIENTS = 32
@@ -188,6 +194,8 @@ class WSConn:
         self.limit = MAX_WS_MESSAGE if self.owner else MAX_GUEST_MESSAGE
         self.id = N.new_id()
         self.out = queue.Queue()
+        self.backlog = 0  # bytes queued or being sent
+        self.lock = threading.Lock()
         self.alive = True
         threading.Thread(target=self._writer, daemon=True).start()
 
@@ -201,6 +209,9 @@ class WSConn:
             except OSError:
                 self.alive = False
                 break
+            finally:
+                with self.lock:
+                    self.backlog -= len(data)
 
     @staticmethod
     def _frame(opcode, payload: bytes) -> bytes:
@@ -213,28 +224,40 @@ class WSConn:
             head = struct.pack("!BBQ", 0x80 | opcode, 127, n)
         return head + payload
 
+    def _queue(self, frame, keep=None):
+        """Queue a frame for the writer. With `keep`, the frame is skipped when
+        more than that many are already waiting (video frames, pongs). A client
+        more than MAX_WS_BACKLOG behind is disconnected."""
+        with self.lock:
+            if not self.alive or (keep is not None and self.out.qsize() > keep):
+                return
+            behind = self.backlog > 0 and self.backlog + len(frame) > MAX_WS_BACKLOG
+            if not behind:
+                self.backlog += len(frame)
+                self.out.put(frame)
+        if behind:
+            self.close()
+
     def send(self, obj):
         if not self.alive:
             return
-        if self.out.qsize() > 20000:  # hopelessly behind; drop it
-            self.close()
-            return
-        self.out.put(self._frame(0x1, json.dumps(obj, separators=(",", ":")).encode()))
+        self._queue(self._frame(0x1, json.dumps(obj, separators=(",", ":")).encode()))
 
     def send_binary(self, data: bytes):
         """Send a video frame, or drop it if this client is still busy with older ones."""
-        if self.alive and self.out.qsize() <= 2:
-            self.out.put(self._frame(0x2, data))
+        self._queue(self._frame(0x2, data), keep=2)
 
     def ping(self):
-        if self.alive:
-            self.out.put(self._frame(0x9, b""))
+        self._queue(self._frame(0x9, b""))
 
     def close(self):
-        if self.alive:
+        with self.lock:
+            was_alive, idle = self.alive, self.backlog == 0
             self.alive = False
+        if was_alive:
             try:
-                self.sock.sendall(self._frame(0x8, b""))
+                if idle:  # the writer isn't mid-frame, and this won't block
+                    self.sock.sendall(self._frame(0x8, b""))
                 self.sock.shutdown(socket.SHUT_RDWR)  # also ends the reader (kicked guests)
             except OSError:
                 pass
@@ -245,6 +268,13 @@ class WSConn:
         if len(buf) < n:
             raise ConnectionError("eof")
         return buf
+
+    def _payload(self, n):
+        mask = self._read(4)
+        if not n:
+            return b""
+        data, key = self._read(n), (mask * (n // 4 + 1))[:n]
+        return (int.from_bytes(data, "big") ^ int.from_bytes(key, "big")).to_bytes(n, "big")
 
     def recv(self):
         """The next message: str (text), bytes (binary), or None when the socket closes."""
@@ -261,26 +291,22 @@ class WSConn:
                 n = struct.unpack("!H", self._read(2))[0]
             elif n == 127:
                 n = struct.unpack("!Q", self._read(8))[0]
-            size += n
+            if opcode >= 0x8:
+                # Control frames are small and never fragmented (RFC 6455, 5.5).
+                if n > 125 or not fin or opcode > 0xA:
+                    raise ConnectionError("bad control frame")
+                data = self._payload(n)
+                if opcode == 0x8:
+                    return None
+                if opcode == 0x9:
+                    self._queue(self._frame(0xA, data), keep=0)  # no pong backlog for a client that doesn't read
+                continue
+            size += n + WS_FRAME_COST
             if size > self.limit:
                 raise ConnectionError("message too large")
-            mask = self._read(4)
-            data = self._read(n) if n else b""
-            if n:
-                key = (mask * (n // 4 + 1))[:n]
-                data = (int.from_bytes(data, "big") ^ int.from_bytes(key, "big")).to_bytes(n, "big")
-            if opcode == 0x8:
-                return None
-            if opcode == 0x9:
-                if n <= 125:
-                    self.out.put(self._frame(0xA, data))
-                size -= n
-                continue
-            if opcode == 0xA:
-                size -= n
-                continue
             if opcode not in (0x0, 0x1, 0x2) or (opcode == 0x0) == (kind is None):
                 raise ConnectionError("unsupported frame")
+            data = self._payload(n)
             kind = kind or opcode
             parts.append(data)
             if fin:

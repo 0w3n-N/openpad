@@ -75,7 +75,13 @@ what the plugin does on your system.
   characters inside the notes folder.
 - **Limits:** 200 MB per file, 64 MB per synced notebook, 2 MB per owner
   message and 512 KB per guest message, caps on pages, strokes, points and
-  connections, and socket timeouts.
+  connections, and socket timeouts. WebSocket messages count 64 bytes per
+  fragment on top of their contents, so floods of tiny or empty fragments
+  hit the limit. Control frames must be whole and at most 125 bytes, and
+  pings aren't answered while replies are already waiting. A client that
+  falls more than 16 MiB behind on what the server sends is disconnected
+  (it reconnects and gets the current state), so one that stops reading
+  can't grow the server's memory.
 - **Port:** on Windows the server binds its port exclusively
   (`SO_EXCLUSIVEADDRUSE`), so another program can't bind the same port
   alongside it.
