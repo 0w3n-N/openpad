@@ -686,6 +686,14 @@ class Hub:
                 self._set(target, msg.get("page") if isinstance(msg.get("page"), str) else None)
                 self.send_state()
                 return
+            elif t == "hide" and conn.role == "pad":
+                # "Show on the computer" is off in the notes app: take its notebook
+                # off the screen, so edits that later sync aren't shown to anyone.
+                if not self.placeholder and N.clean_id(msg.get("id")) == nb["id"]:
+                    self.live_stop()
+                    self._show_nothing()
+                    self.send_state()
+                return
             elif t == "sync-done" and conn.role == "pad":
                 report = {"time": int(time.time()), "ok": msg.get("ok") is True,
                           "notebooks": int(N.num(msg.get("notebooks"), 0, 100000) or 0),

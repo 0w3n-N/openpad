@@ -919,6 +919,40 @@ for sock in (pad, view):
 http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
      json.dumps({"id": bignb["id"], "t": N.now_ms()}).encode())
 
+print("== \"Show on the computer\" switched off")
+shown, shown_page = srv.hub.nb["id"], srv.hub.page
+g, _ = ws(f"/ws?g={srv.guests.tokens['v']}")
+check("a guest sees the notebook on screen", recv_until(g, "state").get("nb", {}).get("id") == shown)
+send(g, {"t": "hide", "id": shown})
+send(view, {"t": "hide", "id": shown})
+send(pad, {"t": "hide", "id": "someothernb1"})
+time.sleep(0.3)
+check("only the notes app can hide, and only the notebook on screen", srv.hub.nb["id"] == shown)
+send(pad, {"t": "hide", "id": shown})
+try:
+    st = recv_until(g, "state", timeout=2)
+except OSError:
+    st = {}
+check("hiding takes it off the screen for guests", st.get("placeholder") is True and shown not in json.dumps(st), st.get("placeholder"))
+hidden_nb = json.loads(http("GET", f"/api/sync/nb/{shown}?k={KEY}")[2])
+hp = next(iter(hidden_nb["pages"].values()))
+hp["strokes"].append(stroke("hiddenink1"))
+hp["t"] = N.now_ms()
+http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(hidden_nb).encode())
+got = []
+try:
+    while True:
+        got.append(recv_any(g, 1))
+except OSError:
+    pass
+check("edits that sync while hidden aren't shown", srv.hub.placeholder and "hiddenink1" not in json.dumps(got)
+      and "hiddenink1" in json.dumps(srv.store.get(shown)))
+g.close()
+send(pad, {"t": "open", "id": shown, "page": shown_page})
+for sock in (pad, view):  # past the "nothing shown" state from hiding
+    while recv_until(sock, "state", timeout=10).get("nb", {}).get("id") != shown:
+        pass
+
 print("== internet links (tunnel)")
 srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
 srv.tunnel.state = "on"

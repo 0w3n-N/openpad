@@ -101,9 +101,12 @@ function onSocket(ok) {
   syncLiveBadge();
 }
 
-// Put the open notebook on the computer's screen (after it's synced there).
+// Put the open notebook on the computer's screen (after it's synced there),
+// or, with "Show on the computer" off, make sure it isn't there: otherwise
+// edits that sync in the background would still be shown to guests.
 async function castCurrent() {
-  if (!ws?.connected || !current || !cast) return;
+  if (!ws?.connected || !current) return;
+  if (!cast) return ws.send({ t: 'hide', id: current.id });
   const id = current.id;
   await sync.push(current).catch(() => {});
   if (current?.id === id) ws.send({ t: 'open', id, page: editor.pid });
@@ -931,7 +934,7 @@ $('#m-cast').onchange = (e) => {
   cast = e.target.checked;
   localStorage.setItem('openpad.cast', cast ? '1' : '0');
   live.ready = false;
-  if (cast) castCurrent();
+  castCurrent();
   syncLiveBadge();
 };
 $('#m-invite').onclick = openInvite;

@@ -51,6 +51,9 @@ what the plugin does on your system.
   files, start window capture, or reach any owner endpoint. Guest tokens
   are new every time OpenPad starts, and **New links** replaces them sooner
   and disconnects every guest. At most 20 guests can connect.
+- **Show on the computer** switched off in a notes app takes its notebook off
+  the screen (the share window and guests then see nothing), so edits that
+  sync in the background aren't shown until it's switched back on.
 - **Nothing shown by default.** When no notebook is open on the iPad (at
   start, or after the one on screen is deleted), the share window and guests
   get an empty, read-only placeholder, never another notebook.

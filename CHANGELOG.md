@@ -4,6 +4,15 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.5 (2026-10-31)
+
+- **Privacy: "Show on the computer" off now really hides the notebook.** It
+  used to only stop live drawing. The notebook stayed on the computer's
+  screen, so edits that synced in the background still reached the share
+  window and guests. Now turning it off (on the iPad app or the web app)
+  takes the notebook off the screen, and it stays off while you write until
+  you turn it back on. Found in the Omarchy plugin marketplace review.
+
 ## 0.7.4 (2026-10-31)
 
 - **Fixed: big notebooks could keep your share window or iPad reconnecting.**

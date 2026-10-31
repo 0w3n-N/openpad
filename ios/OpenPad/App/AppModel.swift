@@ -52,7 +52,7 @@ final class AppModel {
         didSet {
             UserDefaults.standard.set(cast, forKey: "cast")
             liveReady = false
-            if cast { castCurrent() }
+            castCurrent()
         }
     }
     var fingerDrawing: Bool = UserDefaults.standard.bool(forKey: "fingerDrawing") {
@@ -226,9 +226,16 @@ final class AppModel {
         }
     }
 
-    /// Put the open notebook on the computer's screen (after syncing it there).
+    /// Put the open notebook on the computer's screen (after syncing it there),
+    /// or, with "Show on the computer" off, make sure it isn't there: otherwise
+    /// edits that sync in the background would still be shown to guests.
     func castCurrent() {
-        guard cast, socketConnected, let nb = notebook, let sync else { return }
+        guard socketConnected, let nb = notebook else { return }
+        guard cast else {
+            live?.send(["t": "hide", "id": nb.id])
+            return
+        }
+        guard let sync else { return }
         Task {
             try? await sync.push(nb)
             guard notebook?.id == nb.id else { return }
