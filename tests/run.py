@@ -627,10 +627,13 @@ check("only the iPad app can report a sync", json.loads(http("GET", f"/api/info?
 print("== guests")
 W, V = srv.guests.tokens["w"], srv.guests.tokens["v"]
 check("guest links need a valid token", ws("/ws?g=AAAAAAAAAAAAAAAAAAAAAA")[1] == 403)
-gw, code = ws(f"/ws?g={W}&me=alice1")
+ALICE, MALLORY = "alice-secret-0123456789ab", "mallory-secret-0123456789"
+gw, code = ws(f"/ws?g={W}&me={ALICE}")
 st = recv_until(gw, "state")
-check("a draw link joins as a guest who can draw", code == 101 and st["role"] == "guest" and st["write"] and st["by"] == "galice1")
-gv, _ = ws(f"/ws?g={V}&me=bob1")
+ALICE_TAG = st["by"]
+check("a draw link joins as a guest who can draw", code == 101 and st["role"] == "guest" and st["write"]
+      and re.fullmatch(r"g[A-Za-z0-9_-]{20}", ALICE_TAG) and ALICE not in ALICE_TAG, st["by"])
+gv, _ = ws(f"/ws?g={V}&me=bob-secret-0123456789abcd")
 stv = recv_until(gv, "state")
 check("a view link can't draw", stv["write"] is False)
 send(gv, {"t": "begin", "page": pid, "s": stroke("v1")})
@@ -638,7 +641,7 @@ time.sleep(0.3)
 check("view-only guests' ink is ignored", "v1" not in srv.hub.strokes)
 send(gw, {"t": "begin", "page": pid, "s": stroke("g1", by="gsomeoneelse")})
 m = recv_until(pad, "begin")
-check("guest ink is tagged with the guest's id", m["s"]["id"] == "g1" and m["s"].get("by") == "galice1", m)
+check("guest ink is tagged with the guest's id", m["s"]["id"] == "g1" and m["s"].get("by") == ALICE_TAG, m)
 send(pad, {"t": "preview", "page": pid, "id": "pv1", "pts": [[1, 2, 0.5]]})
 send(gw, {"t": "end", "id": sid})
 time.sleep(0.3)
@@ -662,6 +665,28 @@ send(gw, {"t": "pts", "id": sid, "pts": [[5, 5, 0.5]]})
 send(gw, {"t": "remove", "page": pid, "ids": [sid]})
 time.sleep(0.3)
 check("guests can't erase or extend the owner's ink", sid in srv.hub.strokes and len(srv.hub.strokes[sid][0]["pts"]) == 2)
+# Another draw guest sees Alice's tag on her stroke and tries to become her.
+st_m = None
+for claim in (ALICE_TAG, ALICE_TAG[1:], ALICE_TAG[1:] + "aa", "alice1", MALLORY):
+    gm, _ = ws(f"/ws?g={W}&me={claim}")
+    st_m = recv_until(gm, "state")
+    send(gm, {"t": "remove", "page": pid, "ids": ["g1"]})
+    send(gm, {"t": "pts", "id": "g1", "pts": [[9, 9, 0.5]]})
+    time.sleep(0.2)
+    gm.close()
+    if st_m["by"] == ALICE_TAG:
+        break
+check("a guest can't claim another guest's identity", st_m["by"] != ALICE_TAG and "g1" in srv.hub.strokes
+      and len(srv.hub.strokes["g1"][0]["pts"]) == len(stroke("g1")["pts"]), st_m["by"])
+tags = set()
+for _ in range(2):
+    gs, _ = ws(f"/ws?g={W}&me=short")
+    tags.add(recv_until(gs, "state")["by"])
+    gs.close()
+check("a page without a usable secret gets a new identity each time", len(tags) == 2, tags)
+gw.close()
+gw, _ = ws(f"/ws?g={W}&me={ALICE}")
+check("the same secret keeps the same identity after reconnecting", recv_until(gw, "state")["by"] == ALICE_TAG)
 send(gw, {"t": "remove", "page": pid, "ids": ["g1"]})
 time.sleep(0.3)
 check("guests can erase their own ink", "g1" not in srv.hub.strokes)
@@ -685,7 +710,7 @@ srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
 srv.tunnel.state = "on"
 TH = "quiet-river-test.trycloudflare.com"
 check("the guest page works through the tunnel", http("GET", "/join", host=TH)[0] == 200)
-s, code = ws(f"/ws?g={W}&me=carol1", origin=f"https://{TH}", host=TH)
+s, code = ws(f"/ws?g={W}&me=carol-secret-0123456789abc", origin=f"https://{TH}", host=TH)
 check("guests connect through the tunnel", code == 101 and recv_until(s, "state")["role"] == "guest")
 s.close()
 check("the owner key never works through the tunnel",
@@ -820,7 +845,7 @@ secs = st["nb"]["layout"]["sections"]
 check("a PDF becomes a new section of the live notebook",
       len(secs) == before + 1 and any(s["title"] == "Week 2" and len(s["pages"]) == 3 for s in secs))
 check("its pages show the PDF", st["nb"]["pages"][st["page"]]["bg"] == {"pdf": sha3, "n": 1})
-gw, _ = ws(f"/ws?g={W}&me=dave1")
+gw, _ = ws(f"/ws?g={W}&me=dave-secret-0123456789abcd")
 recv_until(gw, "state")
 check("guests can now load that PDF", http("GET", f"/api/asset/{sha3}?g={W}")[0] == 200)
 gw.close()
@@ -828,7 +853,7 @@ gw.close()
 print("== deleting the notebook on screen")
 diary = nb_with(1, "Private diary")
 http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(diary).encode())
-gw, _ = ws(f"/ws?g={W}&me=erin1")
+gw, _ = ws(f"/ws?g={W}&me=erin-secret-0123456789abcd")
 recv_until(gw, "state")
 http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
      json.dumps({"id": srv.hub.nb["id"], "t": N.now_ms()}).encode())

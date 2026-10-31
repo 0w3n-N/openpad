@@ -158,6 +158,18 @@ def launcher_path(code: str) -> Path:
     return runtime_dir() / f"open-{hashlib.sha256(code.encode()).hexdigest()[:20]}.html"
 
 
+GUEST_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{22,64}")
+
+
+def guest_tag(key: str, secret: str) -> str:
+    """A guest's public ink tag (the "by" on their strokes, which every guest
+    sees): a keyed hash of the private secret their page keeps. Seeing someone's
+    tag doesn't let you connect as them, and the same secret keeps the same tag
+    across reconnects, so guests can still erase their own ink."""
+    mac = hmac.new(key.encode(), b"openpad-guest:" + secret.encode(), hashlib.sha256).digest()
+    return "g" + base64.urlsafe_b64encode(mac).decode()[:20]
+
+
 def same(a: str, b: str) -> bool:
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
 
@@ -1244,8 +1256,10 @@ class Handler(BaseHTTPRequestHandler):
         if owner:
             role, write, by = ("pad" if (q.get("role") or [""])[0] == "pad" else "view"), True, None
         else:
-            me = N.clean_id((q.get("me") or [""])[0]) or N.new_id()
-            role, write, by = "guest", guest == "w", "g" + me[:20]
+            me = (q.get("me") or [""])[0]
+            if not GUEST_SECRET_RE.fullmatch(me):
+                me = secrets.token_urlsafe(16)  # no usable secret: a new identity for this connection
+            role, write, by = "guest", guest == "w", guest_tag(self.app.token, me)
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")

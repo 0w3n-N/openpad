@@ -4,6 +4,15 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.2 (2026-10-31)
+
+- **Security: guests can't pose as each other.** A guest with a "can draw"
+  link could reconnect using another guest's id (shown on that guest's
+  strokes) and erase their ink. A guest's id is now a keyed hash of a private
+  secret their browser keeps, so a visible id can't be reused. Guests keep
+  their id across reconnects, as before; ids from before this update change
+  once. Found in the Omarchy plugin marketplace review.
+
 ## 0.7.1 (2026-10-30)
 
 - **PIN pairing is harder to guess.** A PIN is dropped after 5 wrong tries,

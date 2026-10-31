@@ -6,7 +6,7 @@ import { Backgrounds, COLORS, buildPDF, pdfName, savePDF } from './ink.js';
 import { Editor } from './editor.js';
 import { PROTOCOL, socket } from './link.js';
 import { fitToolbar } from './ui.js';
-import { mergeInto, newId, normalize, order, sectionOf } from './model.js';
+import { mergeInto, normalize, order, sectionOf } from './model.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -14,12 +14,20 @@ const $$ = (s) => document.querySelectorAll(s);
 const params = new URLSearchParams(location.hash.slice(1));
 const kind = params.has('w') ? 'w' : 'v';
 const token = params.get(kind) || '';
+// A private 128-bit secret that keeps this browser's identity across
+// reconnects. The server turns it into the public tag on our strokes; the
+// secret itself is never shown to anyone else.
+const newSecret = () => {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
 let me = '';
 try {
   me = localStorage.getItem('openpad.me') || '';
-  if (!/^[A-Za-z0-9_-]{6,40}$/.test(me)) localStorage.setItem('openpad.me', (me = newId()));
+  if (!/^[A-Za-z0-9_-]{22,64}$/.test(me)) localStorage.setItem('openpad.me', (me = newSecret()));
 } catch {
-  me = newId();
+  me = newSecret();
 }
 const q = `g=${encodeURIComponent(token)}`;
 

@@ -43,7 +43,10 @@ what the plugin does on your system.
 - **Guests** get separate 128-bit tokens, one for "can draw" links and one for
   "view only". With either, a guest can only receive the notebook currently
   shown and the PDFs and images on its pages. A "can draw" guest can add ink
-  and remove only ink tagged with their own id. Guests can't read other
+  and remove only ink tagged with their own id. That id is a keyed hash
+  (HMAC with the owner key) of a private 128-bit secret their browser keeps,
+  so the ids other guests see on strokes can't be used to act as that guest.
+  Guests can't read other
   notebooks, sync, turn pages for others, rename or restructure anything, add
   files, start window capture, or reach any owner endpoint. Guest tokens
   are new every time OpenPad starts, and **New links** replaces them sooner
