@@ -78,10 +78,18 @@ what the plugin does on your system.
   connections, and socket timeouts. WebSocket messages count 64 bytes per
   fragment on top of their contents, so floods of tiny or empty fragments
   hit the limit. Control frames must be whole and at most 125 bytes, and
-  pings aren't answered while replies are already waiting. A client that
-  falls more than 16 MiB behind on what the server sends is disconnected
-  (it reconnects and gets the current state), so one that stops reading
-  can't grow the server's memory.
+  pings aren't answered while replies are already waiting.
+- **Memory a client can make the server hold** is bounded:
+  - Files, including range requests, are sent in 1 MiB pieces and never
+    read whole into memory.
+  - The notebook on screen is encoded once per page and shared by every
+    connection, so viewers that stop reading don't each hold a copy.
+  - A newer copy of the notebook replaces older unsent ones and the
+    messages it already includes.
+  - A client more than 4 MiB behind on other messages is disconnected (it
+    reconnects and gets the current state).
+  - All guests together may add 10,000 strokes and 250,000 points per
+    guest-link session; **New links** starts a new one.
 - **Port:** on Windows the server binds its port exclusively
   (`SO_EXCLUSIVEADDRUSE`), so another program can't bind the same port
   alongside it.

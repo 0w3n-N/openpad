@@ -86,6 +86,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
   },
   frame: (b) => editor.surface.pushFrame(b),
   message(msg) {
+    if (msg.t === 'error') return toast(msg.error, 6000);
     if (msg.t === 'theme') {
       theme.href = `/theme.css?${q}&v=${Date.now()}`;
       return;

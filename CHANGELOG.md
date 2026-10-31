@@ -4,6 +4,24 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.4 (2026-10-31)
+
+- **Fixed: big notebooks could keep your share window or iPad reconnecting.**
+  0.7.3 treated a client that was still downloading a notebook over 16 MiB
+  as stuck, and disconnected it whenever anything else was sent meanwhile.
+  Now only small backed-up messages count, and a newer copy of the notebook
+  replaces older unsent ones.
+- **Security: guests can't make the computer hold large amounts of memory.**
+  - Files a guest asks for in parts (PDF pages) are sent in 1 MiB pieces
+    instead of being read whole into memory. This was found in the Omarchy
+    plugin marketplace review.
+  - The notebook on screen is encoded once per page and shared by everyone
+    watching, instead of copied for each viewer.
+  - Guests together can add up to 10,000 strokes and 250,000 points per
+    session, far more than a call needs; **New links** starts a new session.
+    A guest page says so when the limit is reached.
+- Erasing no longer re-sorts the page's whole list of erased strokes each time.
+
 ## 0.7.3 (2026-10-31)
 
 - **Security: a guest can't exhaust the computer's memory.** Anyone with a

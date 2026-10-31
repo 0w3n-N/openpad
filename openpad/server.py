@@ -21,12 +21,12 @@ Security model (see SECURITY.md):
 from __future__ import annotations
 
 import base64
+import bisect
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
-import queue
 import re
 import secrets
 import socket
@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -64,9 +65,17 @@ MAX_GUEST_MESSAGE = 512 * 1024
 # What keeping one received frame costs beyond its payload. Counted toward the
 # message limit, so floods of tiny or empty fragments hit it quickly.
 WS_FRAME_COST = 64
-# Unsent data a client may fall behind by. Past it the client is disconnected;
-# it reconnects and gets the current state.
-MAX_WS_BACKLOG = 16 * 1024 * 1024
+# Unsent messages a client may fall behind by (not counting the notebook
+# itself, which a newer copy replaces). Past it the client is disconnected; it
+# reconnects and gets the current state.
+MAX_WS_BACKLOG = 4 * 1024 * 1024
+# Ink all guests together may add per guest-link session (New links resets
+# it): far more than a call needs, small enough that guests can't grow the
+# notebook, or the server's memory, without bound.
+GUEST_INK_STROKES = 10_000
+GUEST_INK_POINTS = 250_000
+# Messages a newer notebook state makes redundant (see WSConn.send_state).
+STATE_COVERS = {"begin", "pts", "end", "remove", "restore", "goto", "merge", "peers", "cursor"}
 MAX_NOTEBOOK_BYTES = 64 * 1024 * 1024
 MAX_SECTION_PDF = 400 * 1024 * 1024
 MAX_WS_CLIENTS = 32
@@ -86,6 +95,8 @@ PAGES = {"/": "app.html", "/app": "app.html", "/view": "view.html", "/join": "jo
 TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
          ".webmanifest": "application/manifest+json"}
+# Tests: check every state the server sends against the notebook it describes.
+CHECK_STATE = bool(os.environ.get("OPENPAD_CHECK_STATE"))
 GUEST_PATHS = {"/join", "/ws", "/theme.css", "/api/live/frame.jpg", "/api/ping"}
 
 
@@ -176,6 +187,10 @@ def guest_tag(key: str, secret: str) -> str:
     return "g" + base64.urlsafe_b64encode(mac).decode()[:20]
 
 
+def dumps(obj) -> bytes:
+    return json.dumps(obj, separators=(",", ":")).encode()
+
+
 def same(a: str, b: str) -> bool:
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
 
@@ -193,75 +208,119 @@ class WSConn:
         self.by = by  # guests: the id their strokes carry
         self.limit = MAX_WS_MESSAGE if self.owner else MAX_GUEST_MESSAGE
         self.id = N.new_id()
-        self.out = queue.Queue()
-        self.backlog = 0  # bytes queued or being sent
-        self.lock = threading.Lock()
+        self.told_full = False  # guests: told the guest ink budget is used up
+        # Frames waiting for the writer: (parts, size, kind), where kind is
+        # "state" (the whole notebook), "op" (covered by a newer state) or "msg".
+        self.pending = deque()
+        self.backlog = 0  # bytes waiting, not counting a state
+        self.busy = False  # the writer is sending a frame
+        self.cond = threading.Condition()
         self.alive = True
         threading.Thread(target=self._writer, daemon=True).start()
 
     def _writer(self):
-        while self.alive:
-            data = self.out.get()
-            if data is None:
-                break
+        while True:
+            with self.cond:
+                while self.alive and not self.pending:
+                    self.cond.wait()
+                if not self.alive:
+                    return
+                parts, size, kind = self.pending.popleft()
+                if kind != "state":
+                    self.backlog -= size
+                self.busy = True
             try:
-                self.sock.sendall(data)
+                for part in parts:  # big parts are shared with other connections, never copied
+                    self.sock.sendall(part)
             except OSError:
-                self.alive = False
-                break
+                with self.cond:
+                    self.alive = False
+                return
             finally:
-                with self.lock:
-                    self.backlog -= len(data)
+                with self.cond:
+                    self.busy = False
 
     @staticmethod
-    def _frame(opcode, payload: bytes) -> bytes:
-        n = len(payload)
+    def _head(opcode, n) -> bytes:
         if n < 126:
-            head = struct.pack("!BB", 0x80 | opcode, n)
-        elif n < 65536:
-            head = struct.pack("!BBH", 0x80 | opcode, 126, n)
-        else:
-            head = struct.pack("!BBQ", 0x80 | opcode, 127, n)
-        return head + payload
+            return struct.pack("!BB", 0x80 | opcode, n)
+        if n < 65536:
+            return struct.pack("!BBH", 0x80 | opcode, 126, n)
+        return struct.pack("!BBQ", 0x80 | opcode, 127, n)
 
-    def _queue(self, frame, keep=None):
-        """Queue a frame for the writer. With `keep`, the frame is skipped when
-        more than that many are already waiting (video frames, pongs). A client
-        more than MAX_WS_BACKLOG behind is disconnected."""
-        with self.lock:
-            if not self.alive or (keep is not None and self.out.qsize() > keep):
+    @classmethod
+    def _frame(cls, opcode, payload: bytes) -> bytes:
+        return cls._head(opcode, len(payload)) + payload
+
+    def _queue(self, payload, opcode=0x1, kind="msg", keep=None):
+        """Queue one frame made of `payload` parts (bytes). With `keep`, the frame
+        is skipped when more than that many are already waiting (video frames,
+        pongs). A state replaces waiting ops and older states, which it already
+        includes. A client more than MAX_WS_BACKLOG behind is disconnected."""
+        frame, small = [], [self._head(opcode, sum(map(len, payload)))]
+        for part in payload:  # join small parts; keep big (shared) ones as they are
+            if len(part) < 256:
+                small.append(part)
+                continue
+            if small:
+                frame.append(b"".join(small))
+                small = []
+            frame.append(part)
+        if small:
+            frame.append(b"".join(small))
+        size = sum(map(len, frame))
+        behind = False
+        with self.cond:
+            if not self.alive or (keep is not None and len(self.pending) > keep):
                 return
-            behind = self.backlog > 0 and self.backlog + len(frame) > MAX_WS_BACKLOG
+            if kind == "state":
+                self.pending = deque(e for e in self.pending if e[2] == "msg")
+                self.backlog = sum(e[1] for e in self.pending)
+            elif self.backlog and self.backlog + size > MAX_WS_BACKLOG:
+                behind = True
             if not behind:
-                self.backlog += len(frame)
-                self.out.put(frame)
+                self.pending.append((frame, size, kind))
+                if kind != "state":
+                    self.backlog += size
+                self.cond.notify()
         if behind:
             self.close()
 
     def send(self, obj):
-        if not self.alive:
-            return
-        self._queue(self._frame(0x1, json.dumps(obj, separators=(",", ":")).encode()))
+        if self.alive:
+            self.send_encoded(dumps(obj), obj.get("t"))
+
+    def send_encoded(self, data: bytes, t=None):
+        """A message already encoded (broadcasts encode once for everyone)."""
+        self._queue([data], kind="op" if t in STATE_COVERS else "msg")
+
+    def send_state(self, parts):
+        self._queue(parts, kind="state")
 
     def send_binary(self, data: bytes):
         """Send a video frame, or drop it if this client is still busy with older ones."""
-        self._queue(self._frame(0x2, data), keep=2)
+        self._queue([data], opcode=0x2, kind="op", keep=2)
 
     def ping(self):
-        self._queue(self._frame(0x9, b""))
+        self._queue([], opcode=0x9)
 
     def close(self):
-        with self.lock:
-            was_alive, idle = self.alive, self.backlog == 0
+        with self.cond:
+            was_alive, idle = self.alive, not self.busy and not self.pending
             self.alive = False
+            self.pending.clear()
+            self.cond.notify_all()
         if was_alive:
             try:
-                if idle:  # the writer isn't mid-frame, and this won't block
+                if idle:  # the writer isn't mid-frame; a full socket buffer can't hold us long
+                    self.sock.settimeout(1)
                     self.sock.sendall(self._frame(0x8, b""))
+            except OSError:
+                pass
+            try:
                 self.sock.shutdown(socket.SHUT_RDWR)  # also ends the reader (kicked guests)
             except OSError:
                 pass
-        self.out.put(None)
 
     def _read(self, n):
         buf = self.rfile.read(n)
@@ -299,7 +358,7 @@ class WSConn:
                 if opcode == 0x8:
                     return None
                 if opcode == 0x9:
-                    self._queue(self._frame(0xA, data), keep=0)  # no pong backlog for a client that doesn't read
+                    self._queue([data], opcode=0xA, keep=0)  # no pong backlog for a client that doesn't read
                 continue
             size += n + WS_FRAME_COST
             if size > self.limit:
@@ -336,6 +395,8 @@ class Hub:
         self.nb = None
         self.page = None
         self.on_sync = lambda report: None  # an iPad finished a sync it was asked for
+        self.guest_strokes = self.guest_points = 0  # guest ink this session (see GUEST_INK_*)
+        self.state_mismatches = 0  # OPENPAD_CHECK_STATE (tests): states that differed from the notebook
         self._pick_initial()
 
     def native_capture(self):
@@ -368,6 +429,7 @@ class Hub:
         for p in nb["pages"].values():
             if p["bg"] and p["bg"].get("live"):
                 p["bg"], p["t"] = None, N.now_ms()
+                self._touch(p)
                 self._changed()
 
     @property
@@ -400,6 +462,11 @@ class Hub:
 
     def _index(self):
         self.strokes = {s["id"]: (s, p) for p in self.nb["pages"].values() for s in p["strokes"]}
+        self._pages_json = {}  # page id -> its encoded JSON, shared by every connection's state
+
+    def _touch(self, page):
+        """A page changed in place: encode it afresh for the next state."""
+        self._pages_json.pop(page["id"], None)
 
     def _changed(self):
         self.store.touch(self.nb["id"])
@@ -435,10 +502,30 @@ class Hub:
                 "views": sum(c.role == "view" for c in self.conns),
                 "guests": sum(c.role == "guest" for c in self.conns)}
 
-    def _state(self, conn):
-        return {"t": "state", "nb": self.nb, "page": self.page, "placeholder": self.placeholder, "live": self.live,
-                "capture": self.capture_mode(), "you": conn.id, "role": conn.role, "write": conn.write, "by": conn.by,
-                **self.peers()}
+    def _nb_parts(self):
+        """The notebook on screen as JSON, in parts. Each page's part is encoded
+        once and shared by every connection until that page changes, so viewers
+        (even ones that stop reading) don't each hold a copy of the notebook.
+        Everything that changes a page in place calls _touch; anything bigger
+        goes through _index, which starts afresh."""
+        nb, cache = self.nb, self._pages_json
+        parts = [dumps({k: v for k, v in nb.items() if k != "pages"})[:-1] + b',"pages":{']
+        for i, (pid, page) in enumerate(nb["pages"].items()):
+            if i:
+                parts.append(b",")
+            piece = cache.get(pid)
+            if piece is None:
+                piece = cache[pid] = dumps(pid) + b":" + dumps(page)
+            parts.append(piece)
+        parts.append(b"}}")  # closes "pages", then the notebook
+        if CHECK_STATE and json.loads(b"".join(parts)) != json.loads(dumps(nb)):
+            self.state_mismatches += 1
+        return parts
+
+    def _state(self, conn, nb_parts):
+        rest = {"page": self.page, "placeholder": self.placeholder, "live": self.live, "capture": self.capture_mode(),
+                "you": conn.id, "role": conn.role, "write": conn.write, "by": conn.by, **self.peers()}
+        return [b'{"t":"state","nb":', *nb_parts, b"," + dumps(rest)[1:]]
 
     def join(self, conn) -> bool:
         with self.lock:
@@ -446,7 +533,7 @@ class Hub:
                     (conn.role == "guest" and self.peers()["guests"] >= MAX_GUESTS):
                 return False
             self.conns.append(conn)
-            conn.send(self._state(conn))
+            conn.send_state(self._state(conn, self._nb_parts()))
             if self.frame and self.live["state"] == "live":
                 conn.send_binary(self.frame)
             self.broadcast({"t": "peers", **self.peers()})
@@ -474,15 +561,18 @@ class Hub:
         return len(pads)
 
     def kick_guests(self):
+        """New links: everyone on the old ones leaves, and guests get a fresh ink budget."""
         with self.lock:
             guests = [c for c in self.conns if c.role == "guest"]
+            self.guest_strokes = self.guest_points = 0
         for c in guests:
             c.close()
 
     def broadcast(self, msg, skip=None):
+        data = dumps(msg)  # encoded once, shared by every connection's queue
         for c in list(self.conns):
             if c is not skip:
-                c.send(msg)
+                c.send_encoded(data, msg.get("t"))
 
     def ping_all(self):
         for c in list(self.conns):
@@ -490,8 +580,9 @@ class Hub:
 
     def send_state(self):
         with self.lock:
+            nb_parts = self._nb_parts()
             for c in list(self.conns):
-                c.send(self._state(c))
+                c.send_state(self._state(c, nb_parts))
         self.on_change()
 
     # ------------------------------------------------------------- messages
@@ -512,18 +603,22 @@ class Hub:
                     return
                 s.pop("by", None)
                 if conn.by:
+                    if not self._guest_ink(conn, 1, len(s["pts"])):
+                        return
                     s["by"] = conn.by
                 page["strokes"].append(s)
                 self.strokes[s["id"]] = (s, page)
+                self._touch(page)
                 out = {"t": "begin", "page": page["id"], "s": s}
             elif t == "pts" and conn.write:
-                s, _ = self.strokes.get(N.clean_id(msg.get("id")) or "", (None, None))
+                s, spage = self.strokes.get(N.clean_id(msg.get("id")) or "", (None, None))
                 if not s or s.get("by") != conn.by:
                     return
                 pts = N.clean_points(msg.get("pts"), N.MAX_POINTS_PER_STROKE - len(s["pts"]))
-                if not pts:
+                if not pts or (conn.by and not self._guest_ink(conn, 0, len(pts))):
                     return
                 s["pts"].extend(pts)
+                self._touch(spage)
                 out = {"t": "pts", "id": s["id"], "pts": pts}
             elif t == "end" and conn.write:
                 sid = N.clean_id(msg.get("id"))
@@ -540,9 +635,12 @@ class Hub:
                     return
                 gs = set(gone)
                 page["strokes"] = [s for s in page["strokes"] if s["id"] not in gs]
-                page["gone"] = sorted(set(page["gone"]) | gs)
-                for i in gone:
+                for i in gone:  # kept sorted (the sync digest relies on it) without re-sorting it all
+                    at = bisect.bisect_left(page["gone"], i)
+                    if at == len(page["gone"]) or page["gone"][at] != i:
+                        page["gone"].insert(at, i)
                     self.strokes.pop(i, None)
+                self._touch(page)
                 out = {"t": "remove", "page": page["id"], "ids": gone}
             elif t == "restore" and page and conn.write:
                 strokes = msg.get("strokes") if isinstance(msg.get("strokes"), list) else []
@@ -553,6 +651,8 @@ class Hub:
                             or len(page["strokes"]) >= N.MAX_STROKES_PER_PAGE:
                         continue
                     if not conn.owner:
+                        if not self._guest_ink(conn, 1, len(s["pts"])):
+                            break
                         s["by"] = conn.by
                     page["strokes"].append(s)
                     self.strokes[s["id"]] = (s, page)
@@ -560,6 +660,7 @@ class Hub:
                 if not added:
                     return
                 page["strokes"].sort(key=lambda s: (s["z"], s["id"]))
+                self._touch(page)
                 out = {"t": "restore", "page": page["id"], "strokes": added}
             elif t == "goto" and page and conn.owner:
                 self.page = page["id"]
@@ -620,6 +721,18 @@ class Hub:
             self.broadcast(out, skip=conn)
         if t == "goto":
             self.on_change()
+
+    def _guest_ink(self, conn, strokes, points):
+        """Count a guest's new ink against the session's budget (False: over it)."""
+        if self.guest_strokes + strokes > GUEST_INK_STROKES or self.guest_points + points > GUEST_INK_POINTS:
+            if not conn.told_full:
+                conn.told_full = True
+                conn.send({"t": "error", "error": "Guests have added as much ink as one session allows. "
+                                                  "The presenter can start a new one with New links."})
+            return False
+        self.guest_strokes += strokes
+        self.guest_points += points
+        return True
 
     def _add_pdf(self, msg):
         """A PDF opened in the share window: its pages become a new section
@@ -760,6 +873,7 @@ class Hub:
             page["h"] = round(N.PAGE_W * h / w, 2)
             page["pt"] = [round(w * 0.75, 2), round(h * 0.75, 2)]
             page["t"] = N.now_ms()
+            self._touch(page)
             self._changed()
         self.send_state()
 
@@ -770,6 +884,7 @@ class Hub:
                 # The last frame stays on the page, as an image every device syncs.
                 page["bg"] = {"img": self.store.add_asset_bytes(self.frame)} if self.frame else None
                 page["t"] = N.now_ms()
+                self._touch(page)
                 self._changed()
             self.capture = None
             self.frame = None
@@ -1236,7 +1351,9 @@ class Handler(BaseHTTPRequestHandler):
             missing = sorted(a for a in N.assets(merged) if not self.app.store.has_asset(a))
             body = json.dumps({"d": d, "missing": missing, "nb": merged if d != theirs else None},
                               separators=(",", ":")).encode()
-        self.app.hub.notebook_changed(nb["id"])
+            # Still under the lock, so no state is sent from the merged notebook
+            # before the parts that describe it are refreshed.
+            self.app.hub.notebook_changed(nb["id"])
         self._send(200, body, "application/json")
 
     def _asset(self, sha):
@@ -1251,6 +1368,7 @@ class Handler(BaseHTTPRequestHandler):
             "image/png" if head.startswith(b"\x89PNG") else "application/octet-stream"
         extra = {"Cache-Control": "private, max-age=31536000, immutable", "Accept-Ranges": "bytes"}
         # Range requests let pdf.js fetch only the parts of a big PDF it needs.
+        start, length, code = 0, size, 200
         m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
         if m and (m.group(1) or m.group(2)):
             if m.group(1):
@@ -1260,19 +1378,23 @@ class Handler(BaseHTTPRequestHandler):
                 start, end = max(0, size - int(m.group(2))), size - 1
             if start > end or start >= size:
                 return self._send(416, b"", extra={"Content-Range": f"bytes */{size}"})
-            with open(f, "rb") as fh:
-                fh.seek(start)
-                body = fh.read(end - start + 1)
-            return self._send(206, body, ctype, {**extra, "Content-Range": f"bytes {start}-{end}/{size}"})
-        self.send_response(200)
-        for k, v in {"Content-Type": ctype, "Content-Length": str(size), **SECURITY_HEADERS, **self._cors(), **extra}.items():
+            length, code = end - start + 1, 206
+            extra["Content-Range"] = f"bytes {start}-{end}/{size}"
+        self.send_response(code)
+        for k, v in {"Content-Type": ctype, "Content-Length": str(length), **SECURITY_HEADERS, **self._cors(), **extra}.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command == "HEAD":
             return
+        # Streamed in 1 MiB pieces: a request never holds more than that in memory.
         with open(f, "rb") as fh:
-            while chunk := fh.read(1 << 20):
+            fh.seek(start)
+            while length > 0:
+                chunk = fh.read(min(length, 1 << 20))
+                if not chunk:
+                    break
                 self.wfile.write(chunk)
+                length -= len(chunk)
 
     def _websocket(self, q, owner, guest):
         key = self.headers.get("Sec-WebSocket-Key")

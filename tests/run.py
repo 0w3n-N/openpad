@@ -36,6 +36,7 @@ TMP = tempfile.mkdtemp(prefix="openpad-test-")
 os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "data")
 os.environ["XDG_RUNTIME_DIR"] = os.path.join(TMP, "run")
 os.environ["OPENPAD_NOTES"] = os.path.join(TMP, "notes")
+os.environ["OPENPAD_CHECK_STATE"] = "1"  # every state sent is checked against the notebook
 os.makedirs(os.environ["XDG_RUNTIME_DIR"], mode=0o700)
 sys.path.insert(0, ROOT)
 
@@ -750,7 +751,7 @@ for _ in range(40):
         g.sendall(ping * 2500)
     except OSError:
         break
-    worst = max(worst, conn.out.qsize())
+    worst = max(worst, len(conn.pending) if hasattr(conn, "pending") else conn.out.qsize())
 check("a ping flood that never reads the replies doesn't pile them up", worst <= 2, worst)
 g.close()
 msg = json.dumps({"t": "cursor", "page": srv.hub.page, "x": 7, "y": 8}).encode()
@@ -771,6 +772,152 @@ check("a client that falls too far behind is disconnected, without blocking the 
       not t.is_alive() and not slow.alive and slow.backlog <= MAX_WS_BACKLOG + 2 * 1024 * 1024, (t.is_alive(), slow.alive))
 a.close()
 b.close()
+
+print("== memory a guest can make the server hold")
+import tracemalloc  # noqa: E402
+
+import openpad.server as S  # noqa: E402
+
+blob = b"%PDF-1.4\n" + os.urandom(8 * 1024 * 1024)
+bsha = hashlib.sha256(blob).hexdigest()
+check("a big PDF uploads", http("PUT", f"/api/asset/{bsha}?k={KEY}", {"Content-Type": "application/pdf"}, blob)[0] == 200)
+
+
+def range_get(rng, method="GET"):
+    """A range request whose body is hashed and dropped, not kept."""
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+    s.sendall(f"{method} /api/asset/{bsha}?k={KEY} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nRange: {rng}\r\n"
+              "Connection: close\r\n\r\n".encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += s.recv(4096)
+    head, rest = head.split(b"\r\n\r\n", 1)
+    h, got = hashlib.sha256(rest), len(rest)
+    while chunk := s.recv(65536):
+        h.update(chunk)
+        got += len(chunk)
+    s.close()
+    return head.decode(), got, h.hexdigest()
+
+
+tracemalloc.start()
+head, got, digest = range_get("bytes=0-")
+_, peak = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+check("a whole-file range request is streamed, not held in memory",
+      " 206 " in head.split("\r\n")[0] and got == len(blob) and digest == bsha and peak < 4 * 1024 * 1024,
+      (head.split("\r\n")[0], got, peak))
+head, got, digest = range_get("bytes=1048570-3145740")
+check("a range across the 1 MiB pieces comes back exact", got == 3145740 - 1048570 + 1
+      and digest == hashlib.sha256(blob[1048570:3145741]).hexdigest() and f"bytes 1048570-3145740/{len(blob)}" in head)
+head, got, _ = range_get("bytes=0-99", "HEAD")
+check("HEAD sends the headers only", got == 0 and "Content-Length: 100" in head, head)
+
+# Every connection's state shares the notebook's encoded pages.
+try:
+    a1, a2 = srv.hub._nb_parts(), srv.hub._nb_parts()
+    shared = len(a1) > 2 and all(x is y for x, y in zip(a1[1:], a2[1:]))
+    send(pad, {"t": "begin", "page": srv.hub.page, "s": stroke()})
+    time.sleep(0.3)
+    a3 = srv.hub._nb_parts()
+    changed = [i for i, (x, y) in enumerate(zip(a2, a3)) if i and x is not y]
+except AttributeError:
+    shared, changed = False, None
+check("viewers share one encoded copy of each page", shared)
+check("a change re-encodes only the page it changed", changed is not None and len(changed) == 1, changed)
+
+# Guest ink budget.
+saved = getattr(S, "GUEST_INK_POINTS", 0), getattr(S, "GUEST_INK_STROKES", 0)
+S.GUEST_INK_POINTS, S.GUEST_INK_STROKES = 100, 3
+srv.hub.guest_strokes = srv.hub.guest_points = 0
+pg = srv.hub.page
+g, _ = ws(f"/ws?g={W}&me=budget-secret-0123456789ab")
+recv_until(g, "state")
+send(g, {"t": "begin", "page": pg, "s": stroke("bud1", n=60)})
+send(g, {"t": "pts", "id": "bud1", "pts": [[1, 1, 0.5]] * 60})
+send(g, {"t": "begin", "page": pg, "s": stroke("bud2", n=30)})
+send(g, {"t": "begin", "page": pg, "s": stroke("bud3", n=30)})
+try:
+    err = recv_until(g, "error", timeout=2).get("error", "")
+except OSError:
+    err = ""
+time.sleep(0.3)
+check("guests together can only add so much ink per session",
+      len(srv.hub.strokes["bud1"][0]["pts"]) == 60 and "bud2" in srv.hub.strokes and "bud3" not in srv.hub.strokes
+      and "New links" in err, (err, "bud3" in srv.hub.strokes))
+http("POST", f"/api/guests?k={KEY}", {"Content-Type": "application/json"}, b'{"action":"rotate"}')
+W = srv.guests.tokens["w"]
+g, _ = ws(f"/ws?g={W}&me=budget-secret-0123456789ab")
+recv_until(g, "state")
+send(g, {"t": "begin", "page": pg, "s": stroke("bud4", n=30)})
+time.sleep(0.3)
+check("New links starts a fresh budget", "bud4" in srv.hub.strokes)
+S.GUEST_INK_POINTS, S.GUEST_INK_STROKES = saved
+g.close()
+send(pad, {"t": "remove", "page": pg, "ids": ["bud4", "bud2", "bud1"]})
+time.sleep(0.3)
+gone = srv.hub.nb["pages"][pg]["gone"]
+check("erased ids stay sorted", gone == sorted(gone) and {"bud1", "bud2", "bud4"} <= set(gone))
+
+# A newer state replaces older unsent ones and the messages it covers.
+a, b = socket.socketpair()
+a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+c = WSConn(a, a.makefile("rb"), "guest")
+piece = b"x" * (8 * 1024 * 1024)  # far more than the socket buffers: the first state stalls
+try:
+    c.send_state([b'{"t":"state","nb":"', piece, b'"}'])
+    time.sleep(0.2)  # the writer is now stuck on that one
+    for _ in range(10):
+        c.send({"t": "pts", "id": "x", "pts": []})
+        c.send_state([b'{"t":"state","nb":"', piece, b'"}'])
+    time.sleep(0.2)
+    with c.cond:
+        kinds = [e[2] for e in c.pending]
+        shares = all(any(part is piece for part in e[0]) for e in c.pending)
+    coalesced = c.alive and kinds == ["state"] and shares
+except AttributeError:
+    coalesced = False
+check("a stalled viewer holds one pending state at most, sharing its pages", coalesced)
+c.close()
+a.close()
+b.close()
+
+# A notebook bigger than 0.7.3's 16 MiB cut-off: a viewer still downloading it
+# isn't cut off when other messages arrive meanwhile.
+prev_nb, prev_page = srv.hub.nb["id"], srv.hub.page
+bignb = nb_with(1, "Semester")
+bpage = next(iter(bignb["pages"].values()))
+bpage["strokes"] = [stroke(f"semester{i:02d}", n=50000) for i in range(20)]
+code, _, body = http("POST", f"/api/sync/nb?k={KEY}", {"Content-Type": "application/json"}, json.dumps(bignb).encode())
+check("a big notebook syncs", code == 200, code)
+send(pad, {"t": "open", "id": bignb["id"]})
+for sock in (pad, view):
+    st = recv_until(sock, "state", timeout=20)
+check("and opens", st.get("nb", {}).get("title") == "Semester" and len(json.dumps(st["nb"])) > 17 * 1024 * 1024)
+before = {c.id for c in srv.hub.conns}
+slow, _ = ws(f"/ws?g={srv.guests.tokens['v']}")  # doesn't read: the 18 MB state can't all go out yet
+time.sleep(0.5)
+for i in range(50):
+    send(view, {"t": "cursor", "page": bpage["id"], "x": i, "y": i})
+time.sleep(0.5)
+still = [c for c in srv.hub.conns if c.id not in before]
+check("a viewer still downloading a big notebook isn't cut off by other messages",
+      len(still) == 1 and still[0].alive, [c.alive for c in still])
+st, last = {}, None
+try:
+    st = recv_until(slow, "state", timeout=20)
+    for _ in range(50):
+        last = recv_until(slow, "cursor", timeout=5).get("x", last)
+except OSError:
+    pass
+check("and gets the notebook, then what happened meanwhile", st.get("nb", {}).get("title") == "Semester" and last == 49, last)
+slow.close()
+send(pad, {"t": "open", "id": prev_nb, "page": prev_page})
+for sock in (pad, view):
+    recv_until(sock, "state", timeout=10)
+http("POST", f"/api/sync/delete?k={KEY}", {"Content-Type": "application/json"},
+     json.dumps({"id": bignb["id"], "t": N.now_ms()}).encode())
 
 print("== internet links (tunnel)")
 srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
@@ -1294,6 +1441,7 @@ except ValueError as e:
     refused = str(e)
 check("a build with another version is refused", "0.0.1" in refused, refused)
 
+check("every notebook state the server sent matched its notebook", getattr(srv.hub, "state_mismatches", 0) == 0)
 srv.shutdown()
 srv.server_close()
 print(f"\n{sum(results)}/{len(results)} passed")
