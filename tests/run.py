@@ -963,6 +963,99 @@ for sock in (pad, view):  # past the "nothing shown" state from hiding
     while recv_until(sock, "state", timeout=10).get("nb", {}).get("id") != shown:
         pass
 
+print("== slow or idle connections can't take every slot")
+import openpad.server as S  # noqa: E402
+
+saved_deadline = getattr(S, "UNTRUSTED_DEADLINE", None)
+S.UNTRUSTED_DEADLINE = 2
+
+
+def hangs_up(sock, within):
+    """True if the server closes `sock` within `within` seconds."""
+    sock.settimeout(within)
+    try:
+        while sock.recv(4096):
+            pass
+        return True
+    except (socket.timeout, TimeoutError):
+        return False
+    except OSError:
+        return True
+
+
+t0 = time.monotonic()
+slow = socket.create_connection(("127.0.0.1", PORT))
+slow.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+trickled = 0
+try:
+    for _ in range(8):  # a header line every second, well inside the 20 s idle timeout
+        time.sleep(1)
+        slow.sendall(b"X-Slow-%d: 1\r\n" % trickled)
+        trickled += 1
+except OSError:
+    pass
+check("a request trickled in a line at a time is cut off", trickled < 5 and hangs_up(slow, 2), trickled)
+slow.close()
+tls = socket.create_connection(("127.0.0.1", PORT))
+tls.sendall(b"\x16")  # starts a TLS handshake, then stalls
+check("so is a TLS handshake that never finishes", hangs_up(tls, 4))
+tls.close()
+idle = socket.create_connection(("127.0.0.1", PORT))
+check("and a connection that never sends anything", hangs_up(idle, 4))
+idle.close()
+k = socket.create_connection(("127.0.0.1", PORT))
+k.sendall(f"GET /api/ping HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+check("a request without a key or guest link gets its answer, then the connection closes",
+      hangs_up(k, 3))
+k.close()
+k = socket.create_connection(("127.0.0.1", PORT))
+k.settimeout(3)
+answers = 0
+for _ in range(2):
+    k.sendall(f"GET /api/info HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nX-OpenPad-Key: {KEY}\r\n\r\n".encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        buf += k.recv(4096)
+    head, body = buf.split(b"\r\n\r\n", 1)
+    n = int(re.search(rb"Content-Length: (\d+)", head).group(1))
+    while len(body) < n:
+        body += k.recv(4096)
+    answers += head.startswith(b"HTTP/1.1 200")
+check("the owner's connections stay open for more requests", answers == 2)
+k.close()
+time.sleep(3)  # the deadline isn't held against requests that finish in time
+check("requests that finish in time aren't cut off", http("GET", "/app")[0] == 200
+      and http("GET", f"/api/info?k={KEY}")[0] == 200)
+
+# One address (not this computer) can't take every slot.
+S.UNTRUSTED_DEADLINE = saved_deadline  # the usual 15 s, so nothing here runs out mid-check
+peers = []
+
+
+def from_lan(addr="10.0.0.7"):
+    a, b = socket.socketpair()
+    srv.process_request(a, (addr, 40000 + len(peers)))
+    peers.append(b)
+    return b
+
+
+limit = getattr(S, "MAX_CONNECTIONS_PER_ADDRESS", 12)
+held = [from_lan() for _ in range(limit)]
+extra = from_lan()
+check("one address can only hold so many connections", hangs_up(extra, 2))
+check("other addresses can still connect", not hangs_up(from_lan("10.0.0.8"), 0.5))
+g = held[0]
+g.sendall(f"GET /theme.css?g={srv.guests.tokens['v']} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+time.sleep(0.3)
+check("a guest link doesn't free its connection's place", hangs_up(from_lan(), 2))
+o = held[1]
+o.sendall(f"GET /api/info HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nX-OpenPad-Key: {KEY}\r\n\r\n".encode())
+time.sleep(0.3)
+check("the owner key does", not hangs_up(from_lan(), 0.5))
+for b in peers:
+    b.close()
+time.sleep(1)
+
 print("== internet links (tunnel)")
 srv.tunnel.url = "https://quiet-river-test.trycloudflare.com"
 srv.tunnel.state = "on"

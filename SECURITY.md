@@ -82,6 +82,13 @@ what the plugin does on your system.
   fragment on top of their contents, so floods of tiny or empty fragments
   hit the limit. Control frames must be whole and at most 125 bytes, and
   pings aren't answered while replies are already waiting.
+- **Connection slots:** a connection without the owner key or a guest link
+  (pages, static files, pairing) must finish its request within 15 seconds,
+  including any TLS handshake, and is closed after it. Each network address
+  may hold 12 connections at once, except ones with the owner key; this
+  computer's own connections are exempt. So a device on the network that
+  trickles requests or leaves connections idle can't take every slot and
+  keep the iPad out.
 - **Memory a client can make the server hold** is bounded:
   - Files, including range requests, are sent in 1 MiB pieces and never
     read whole into memory.

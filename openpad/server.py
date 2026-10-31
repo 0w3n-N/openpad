@@ -81,6 +81,13 @@ MAX_SECTION_PDF = 400 * 1024 * 1024
 MAX_WS_CLIENTS = 32
 MAX_GUESTS = 20
 MAX_HTTP_CONNECTIONS = 96
+# A connection that hasn't shown an owner key or a guest link (pages, static
+# files, pairing) must finish its request within this many seconds, and is
+# closed after it. Each network address may have this many connections open
+# at once, except ones with the owner key (this computer's own are exempt),
+# so slow or idle connections from one device can't take every slot.
+UNTRUSTED_DEADLINE = 15
+MAX_CONNECTIONS_PER_ADDRESS = 12
 HTTP_TIMEOUT = 20
 WS_TIMEOUT = 90
 WS_PING_EVERY = 25
@@ -189,6 +196,13 @@ def guest_tag(key: str, secret: str) -> str:
 
 def dumps(obj) -> bytes:
     return json.dumps(obj, separators=(",", ":")).encode()
+
+
+def _loopback(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr.split("%")[0]).is_loopback
+    except ValueError:
+        return False
 
 
 def same(a: str, b: str) -> bool:
@@ -1084,6 +1098,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- routing
 
+    def handle_one_request(self):
+        super().handle_one_request()
+        if not self.app.trusted():
+            self.close_connection = True  # no keep-alive before an owner key or guest link
+
     def do_HEAD(self):
         self.do_GET()
 
@@ -1133,6 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         if not self._origin_ok(owner):
             return self._deny()
+        self.app.trust(owner)
 
         if path == "/ws":
             return self._websocket(q, owner, guest)
@@ -1206,6 +1226,7 @@ class Handler(BaseHTTPRequestHandler):
         header_only = path in ("/api/launch", "/api/shutdown")
         if not self._key_ok(q, header_only) or not self._origin_ok(True):
             return self._deny()
+        self.app.trust(owner=True)
         if path == "/api/launch":
             return self._json({"c": self.app.new_launch_code()})
         if path == "/api/shutdown":
@@ -1268,6 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(url.query)
         if self._via_tunnel() or not self._key_ok(q) or not self._origin_ok(True):
             return self._deny()
+        self.app.trust(owner=True)
         size = self._length()
         m = re.fullmatch(r"/api/asset/([0-9a-f]{64})", url.path)
         if m:
@@ -1581,6 +1603,11 @@ class OpenPadServer(ThreadingHTTPServer):
         self.theme = Theme()
         self._active = 0
         self._active_lock = threading.Lock()
+        self._per_address: dict[str, int] = {}  # address -> its connections without the owner key
+        # id(connection's socket) -> (deadline, a duplicate of it): the duplicate
+        # still reaches the connection after TLS takes over (and detaches) the original.
+        self._deadlines: dict[int, tuple[float, socket.socket]] = {}
+        self._conn = threading.local()  # this thread's connection (one thread per connection)
         self._codes: dict[str, float] = {}
         self._lan = lan_addresses()  # once before listening; then every 15 s in the background
         self._mdns = local_hostname()
@@ -1600,27 +1627,93 @@ class OpenPadServer(ThreadingHTTPServer):
         self.tls = self.ca.ensure(self.tls_names())
         super().__init__((host, port), Handler)
         threading.Thread(target=self._maintenance, daemon=True).start()
+        threading.Thread(target=self._watchdog, daemon=True).start()
 
     def server_bind(self):
         if WINDOWS:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
-    # cap concurrent connections so idle sockets can't exhaust threads
+    # Cap concurrent connections so idle sockets can't exhaust threads, and
+    # each address's (owner key aside) so one device can't take them all.
     def process_request(self, request, client_address):
+        addr = client_address[0]
+        counted = not _loopback(addr)
+        try:
+            watch = request.dup()
+        except OSError:
+            self.shutdown_request(request)
+            return
         with self._active_lock:
-            if self._active >= MAX_HTTP_CONNECTIONS:
-                self.shutdown_request(request)
-                return
-            self._active += 1
+            if self._active >= MAX_HTTP_CONNECTIONS or \
+                    (counted and self._per_address.get(addr, 0) >= MAX_CONNECTIONS_PER_ADDRESS):
+                refused = True
+            else:
+                refused = False
+                self._active += 1
+                if counted:
+                    self._per_address[addr] = self._per_address.get(addr, 0) + 1
+                self._deadlines[id(request)] = (time.monotonic() + UNTRUSTED_DEADLINE, watch)
+        if refused:
+            watch.close()
+            self.shutdown_request(request)
+            return
         super().process_request(request, client_address)
 
     def process_request_thread(self, request, client_address):
+        c = self._conn
+        c.key, c.addr = id(request), client_address[0]
+        c.armed, c.counted = True, not _loopback(c.addr)
         try:
             super().process_request_thread(request, client_address)
         finally:
             with self._active_lock:
                 self._active -= 1
+                self._release(c, uncount=True)
+
+    def _release(self, c, uncount):
+        """Lift this connection's deadline and, with `uncount`, take it out of
+        its address's count (caller holds _active_lock)."""
+        if c.armed:
+            c.armed = False
+            entry = self._deadlines.pop(c.key, None)
+            if entry:
+                entry[1].close()
+        if uncount and c.counted:
+            c.counted = False
+            left = self._per_address.get(c.addr, 1) - 1
+            if left > 0:
+                self._per_address[c.addr] = left
+            else:
+                self._per_address.pop(c.addr, None)
+
+    def trust(self, owner):
+        """The request on this thread's connection showed the owner key or a
+        guest link: it may stay open and take its time. Guest connections still
+        count toward their address's limit."""
+        c = self._conn
+        if hasattr(c, "armed"):
+            with self._active_lock:
+                self._release(c, uncount=owner)
+
+    def trusted(self):
+        return not getattr(self._conn, "armed", False)
+
+    def _watchdog(self):
+        """Close untrusted connections that run past their deadline (a request
+        trickled in a byte at a time, or a TLS handshake that never finishes)."""
+        while True:
+            time.sleep(0.5)
+            now = time.monotonic()
+            with self._active_lock:
+                late = [k for k, (deadline, _) in self._deadlines.items() if deadline <= now]
+                late = [self._deadlines.pop(k)[1] for k in late]
+            for sock in late:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)  # the handler's next read or write fails, and it ends
+                except OSError:
+                    pass
+                sock.close()
 
     def finish_request(self, request, client_address):
         """HTTP and HTTPS share the port: a TLS handshake starts with 0x16."""

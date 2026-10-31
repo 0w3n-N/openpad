@@ -4,6 +4,16 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.7 (2026-10-31)
+
+- **Security: another device on the network can't lock the iPad out.** It
+  could open many connections and send each request a byte at a time (or not
+  at all), taking every connection slot so the iPad and browsers couldn't
+  connect. Now a request without the owner key or a guest link must finish
+  within 15 seconds, and its connection closes afterwards. Each device on the
+  network can also hold only 12 connections, apart from ones with the owner
+  key. This was found in the Omarchy plugin marketplace review of Inkcast.
+
 ## 0.7.6 (2026-10-31)
 
 - **Privacy: switching "Show on the computer" off can't be undone by a sync
