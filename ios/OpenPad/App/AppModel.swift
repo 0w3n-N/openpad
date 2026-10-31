@@ -238,7 +238,9 @@ final class AppModel {
         guard let sync else { return }
         Task {
             try? await sync.push(nb)
-            guard notebook?.id == nb.id else { return }
+            // Not if "Show on the computer" was switched off (or another notebook
+            // opened) while it synced: that switch already sent "hide".
+            guard cast, notebook?.id == nb.id else { return }
             live?.send(["t": "open", "id": nb.id, "page": pageID ?? ""])
         }
     }

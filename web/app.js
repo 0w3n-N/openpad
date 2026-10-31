@@ -109,7 +109,14 @@ async function castCurrent() {
   if (!cast) return ws.send({ t: 'hide', id: current.id });
   const id = current.id;
   await sync.push(current).catch(() => {});
-  if (current?.id === id) ws.send({ t: 'open', id, page: editor.pid });
+  showOnComputer(id, editor.pid);
+}
+
+// Put a notebook on screen once it has synced, unless "Show on the computer"
+// was switched off (or another notebook opened) while it was syncing: that
+// switch already sent "hide", and an "open" now would undo it.
+function showOnComputer(id, page) {
+  if (cast && ws?.connected && current?.id === id) ws.send({ t: 'open', id, page });
 }
 
 function send(msg) {
@@ -337,8 +344,9 @@ async function onFile(file) {
       current.layout = layout;
       await store.saveNotebook(current, pages.map((p) => p.id), { touched: true });
       if (live.ready) {
+        const id = current.id;
         await sync.push(current).catch(() => {});
-        ws.send({ t: 'open', id: current.id, page: pages[0].id });
+        showOnComputer(id, pages[0].id);
       }
       editor.setNotebook(current, pages[0].id);
       toast(`Added ${pdf.name} (${pages.length} pages)`);

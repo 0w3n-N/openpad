@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.0w3n-n.openpad",
   "name": "OpenPad",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "author": "0w3n-N",
   "license": "MIT",
   "description": "Notes for iPad and Apple Pencil: notebooks with sections and pages, PDF annotation, and a live share window for calls. Guests can watch and write along by link, and every notebook syncs to your computer. Optional AirPlay mirroring.",

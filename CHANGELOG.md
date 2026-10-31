@@ -4,6 +4,15 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.6 (2026-10-31)
+
+- **Privacy: switching "Show on the computer" off can't be undone by a sync
+  still in flight.** If you switched it off while the notebook was still
+  syncing (right after switching it on, or importing a PDF), the end of that
+  sync could put the notebook back on screen while the app said "Hidden".
+  Both apps now check the switch again once the sync is done. Found in the
+  Omarchy plugin marketplace review.
+
 ## 0.7.5 (2026-10-31)
 
 - **Privacy: "Show on the computer" off now really hides the notebook.** It

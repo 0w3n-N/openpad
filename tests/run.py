@@ -948,6 +948,16 @@ except OSError:
 check("edits that sync while hidden aren't shown", srv.hub.placeholder and "hiddenink1" not in json.dumps(got)
       and "hiddenink1" in json.dumps(srv.store.get(shown)))
 g.close()
+# The notes apps only ask to show a notebook after checking, once its sync is
+# done, that "Show on the computer" is still on (it may have been switched off,
+# sending "hide", while the sync was in flight).
+app_js = open(os.path.join(ROOT, "web", "app.js")).read()
+opens = [ln.strip() for ln in app_js.splitlines() if "t: 'open'" in ln]
+swift = open(os.path.join(ROOT, "ios", "OpenPad", "App", "AppModel.swift")).read()
+check("the web app sends open only while the switch is still on",
+      opens == ["if (cast && ws?.connected && current?.id === id) ws.send({ t: 'open', id, page });"], opens)
+check("so does the iPad app", swift.count('"t": "open"') == 1
+      and re.search(r'guard cast, notebook\?\.id == nb\.id else \{ return \}\s*\n\s*live\?\.send\(\["t": "open"', swift))
 send(pad, {"t": "open", "id": shown, "page": shown_page})
 for sock in (pad, view):  # past the "nothing shown" state from hiding
     while recv_until(sock, "state", timeout=10).get("nb", {}).get("id") != shown:
