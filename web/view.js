@@ -117,6 +117,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       return;
     }
     if (msg.t === 'state') {
+      cursor = null; // a state replaces any pen move or lift the server dropped for it
       captureMode = msg.capture || 'native';
       setLive(msg.live?.state || 'idle');
       if (source && msg.live?.state === 'live') source.confirmed = true;
@@ -364,7 +365,7 @@ async function loadInfo(force = false) {
     $('#qr').hidden = !url;
     if (url) $('#qr').src = `/api/qr.svg?${K}&for=app&t=${Date.now()}`;
     else toast('No Wi-Fi address found. Connect to a network, then restart OpenPad.', 6000);
-    const p = await (await api('/api/pairing')).json();
+    const p = await (await api('/api/pairing?pin=1')).json();
     $('#pinaddr').textContent = p.addresses[0] || '—';
     $('#pincode').textContent = p.pin || '—';
     if (p.locked) toast('Too many wrong PINs were tried today. Pair with the QR code instead.', 6000);

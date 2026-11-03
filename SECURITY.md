@@ -51,9 +51,12 @@ what the plugin does on your system.
   files, start window capture, or reach any owner endpoint. Guest tokens
   are new every time OpenPad starts, and **New links** replaces them sooner
   and disconnects every guest. At most 20 guests can connect.
-- **Show on the computer** switched off in a notes app takes its notebook off
-  the screen (the share window and guests then see nothing), so edits that
-  sync in the background aren't shown until it's switched back on.
+- **Show on the computer** switched off in a notes app takes the notebook that
+  app put on the screen off it (the share window and guests then see
+  nothing), so edits that sync in the background aren't shown until it's
+  switched back on. If the app is offline, that happens as soon as it
+  reconnects. It never takes off a notebook another device, or the share
+  window, is showing.
 - **Nothing shown by default.** When no notebook is open on the iPad (at
   start, or after the one on screen is deleted), the share window and guests
   get an empty, read-only placeholder, never another notebook.
@@ -64,10 +67,12 @@ what the plugin does on your system.
   (CORS) but is refused with guest tokens.
 - **Connecting the installed app.** It reads the key from the QR code the
   computer shows (the same code as the Safari link), or trades the 6-digit
-  PIN shown under it for the key. A PIN exists only once the computer's screen
-  shows one, expires after 10 minutes or 5 wrong tries, works once, and the
-  server accepts one try per second. After 20 wrong PINs in a day, PIN pairing
-  stops (the QR code still works) until the day is up or OpenPad restarts.
+  PIN shown under it for the key. A PIN exists only once the computer's
+  pairing screen asks for one (apps reading the computer's name and addresses
+  after pairing don't make one), expires after 10 minutes or 5 wrong tries,
+  works once, and the server accepts one try per second. After 20 wrong PINs
+  in a day, PIN pairing stops (the QR code still works) until the day is up
+  or OpenPad restarts.
 - **Opening the share window** uses a one-time code that expires after 60 s,
   so the key never appears on a process command line.
 - **Input** from devices is validated and rebuilt before it's stored, merged or
@@ -83,15 +88,17 @@ what the plugin does on your system.
   hit the limit. Control frames must be whole and at most 125 bytes, and
   pings aren't answered while replies are already waiting.
 - **Connection slots:** a connection without the owner key or a guest link
-  (pages, static files, pairing) must finish its request within 15 seconds,
-  including any TLS handshake, and is closed after it. Each network address
-  may hold 12 connections at once, except ones with the owner key; this
-  computer's own connections are exempt. So a device on the network that
-  trickles requests or leaves connections idle can't take every slot and
-  keep the iPad out. Internet guests have separate slots (see Internet
-  links), so the internet can't take these either.
+  (pages, static files, pairing) must get its request in within 15 seconds,
+  including any TLS handshake, and is closed after the answer. Sending a page
+  or file isn't held to that deadline, so slow connections still get pdf.js
+  (1.4 MB) whole. Any download stops after 20 seconds without progress. Each
+  network address may hold 12 connections at once, except ones with the
+  owner key; this computer's own connections are exempt. So a device on the
+  network that trickles requests or leaves connections idle can't take every
+  slot and keep the iPad out. Internet guests have separate slots (see
+  Internet links), so the internet can't take these either.
 - **Memory a client can make the server hold** is bounded:
-  - Files, including range requests, are sent in 1 MiB pieces and never
+  - Files, including range requests, are read in 1 MiB pieces and never
     read whole into memory.
   - The notebook on screen is encoded once per page and shared by every
     connection, so viewers that stop reading don't each hold a copy.
@@ -156,9 +163,11 @@ OpenPad.
 
 Internet connections have their own limits, so they can't take the slots this
 computer and the local network use:
-- The internet can hold 48 connections at once, in total.
-- Each internet address can hold 12 of those, guests included. The address is
-  the one Cloudflare reports in `CF-Connecting-IP`. Cloudflare sets that
+- The internet can hold 64 connections at once, in total.
+- Each internet address can hold 24 of those. Guests' live connections
+  (WebSockets) don't count toward that, since at most 20 guests can connect
+  anyway, so a whole room of guests behind one router can join. The address
+  is the one Cloudflare reports in `CF-Connecting-IP`. Cloudflare sets that
   header itself, and the port can only be reached from this computer, so
   internet visitors can't forge it. An IPv6 address counts by its /64, which
   one home or server usually gets whole. A request without that header counts

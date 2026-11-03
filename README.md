@@ -226,9 +226,10 @@ app.
 The notebook you have open on the iPad appears in the share window. In Zoom,
 Teams or Meet, share the window titled **OpenPad**. Its controls hide when the
 mouse is still. Page changes on either side follow each other. To keep a
-notebook private, turn off ⋯ › **Show on the computer**: the notebook leaves
-the share window and guests' screens, and what you write next stays off them
-(it still syncs to your sync folder) until you turn it back on.
+notebook private, turn off ⋯ › **Show on the computer**: the notebook this
+device put there leaves the share window and guests' screens, and what you
+write next stays off them (it still syncs to your sync folder) until you turn
+it back on. It doesn't take off a notebook another device is showing.
 
 ### Invite people
 

@@ -92,6 +92,7 @@ const net = socket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${locatio
       return;
     }
     if (msg.t === 'state') {
+      cursor = null; // a state replaces any pen move or lift the server dropped for it
       canWrite = msg.write;
       editor.canDraw = canWrite;
       editor.by = msg.by;

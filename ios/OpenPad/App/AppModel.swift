@@ -55,6 +55,12 @@ final class AppModel {
             castCurrent()
         }
     }
+    /// The notebook this iPad last put on the computer's screen: switching
+    /// "Show on the computer" off takes only that one off, never one another
+    /// device (or the computer itself) is showing.
+    @ObservationIgnored private var shown: String? = UserDefaults.standard.string(forKey: "shown") {
+        didSet { UserDefaults.standard.set(shown, forKey: "shown") }
+    }
     var fingerDrawing: Bool = UserDefaults.standard.bool(forKey: "fingerDrawing") {
         didSet {
             UserDefaults.standard.set(fingerDrawing, forKey: "fingerDrawing")
@@ -227,21 +233,24 @@ final class AppModel {
     }
 
     /// Put the open notebook on the computer's screen (after syncing it there),
-    /// or, with "Show on the computer" off, make sure it isn't there: otherwise
-    /// edits that sync in the background would still be shown to guests.
+    /// or, with "Show on the computer" off, take off what this iPad put there
+    /// (as soon as it can reach the computer): otherwise edits that sync in
+    /// the background would still be shown to guests.
     func castCurrent() {
-        guard socketConnected, let nb = notebook else { return }
+        guard socketConnected else { return }
         guard cast else {
-            live?.send(["t": "hide", "id": nb.id])
+            if let shown { live?.send(["t": "hide", "id": shown]) }
+            shown = nil
             return
         }
-        guard let sync else { return }
+        guard let nb = notebook, let sync else { return }
         Task {
             try? await sync.push(nb)
             // Not if "Show on the computer" was switched off (or another notebook
             // opened) while it synced: that switch already sent "hide".
-            guard cast, notebook?.id == nb.id else { return }
+            guard cast, socketConnected, notebook?.id == nb.id else { return }
             live?.send(["t": "open", "id": nb.id, "page": pageID ?? ""])
+            shown = nb.id
         }
     }
 

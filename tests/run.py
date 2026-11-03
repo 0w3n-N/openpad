@@ -952,13 +952,27 @@ g.close()
 # The notes apps only ask to show a notebook after checking, once its sync is
 # done, that "Show on the computer" is still on (it may have been switched off,
 # sending "hide", while the sync was in flight).
+# Switching it off takes off only the notebook that app put on screen, not
+# one another device (or the share window) is showing.
 app_js = open(os.path.join(ROOT, "web", "app.js")).read()
 opens = [ln.strip() for ln in app_js.splitlines() if "t: 'open'" in ln]
+hides = [ln.strip() for ln in app_js.splitlines() if "t: 'hide'" in ln]
 swift = open(os.path.join(ROOT, "ios", "OpenPad", "App", "AppModel.swift")).read()
 check("the web app sends open only while the switch is still on",
-      opens == ["if (cast && ws?.connected && current?.id === id) ws.send({ t: 'open', id, page });"], opens)
+      opens == ["ws.send({ t: 'open', id, page });"] and "if (!cast || !ws?.connected || current?.id !== id) return;\n"
+      "  ws.send({ t: 'open', id, page });\n  setShown(id);" in app_js, opens)
+check("and hides only the notebook it put on screen", hides == ["if (shown) ws.send({ t: 'hide', id: shown });"], hides)
 check("so does the iPad app", swift.count('"t": "open"') == 1
-      and re.search(r'guard cast, notebook\?\.id == nb\.id else \{ return \}\s*\n\s*live\?\.send\(\["t": "open"', swift))
+      and re.search(r'guard cast, socketConnected, notebook\?\.id == nb\.id else \{ return \}\s*\n\s*'
+                    r'live\?\.send\(\["t": "open"[^\n]*\n\s*shown = nb\.id', swift))
+check("and hides only what it put on screen too", swift.count('"t": "hide"') == 1
+      and 'if let shown { live?.send(["t": "hide", "id": shown]) }' in swift)
+# A state replaces pen moves the server dropped for it (STATE_COVERS), the
+# pen being lifted among them, so viewers mustn't keep showing the last one.
+for name in ("view.js", "join.js"):
+    src = open(os.path.join(ROOT, "web", name)).read()
+    check(f"a new state clears the presenter's pen dot ({name})",
+          re.search(r"if \(msg\.t === 'state'\) \{\n\s*cursor = null;", src))
 send(pad, {"t": "open", "id": shown, "page": shown_page})
 for sock in (pad, view):  # past the "nothing shown" state from hiding
     while recv_until(sock, "state", timeout=10).get("nb", {}).get("id") != shown:
@@ -1027,6 +1041,38 @@ k.close()
 time.sleep(3)  # the deadline isn't held against requests that finish in time
 check("requests that finish in time aren't cut off", http("GET", "/app")[0] == 200
       and http("GET", f"/api/info?k={KEY}")[0] == 200)
+
+# The deadline is for getting a request in, not for downloading the answer:
+# pdf.js (1.4 MB) on a slow link must still arrive whole.
+worker = "/node_modules/pdfjs-dist/pdf.worker.min.mjs"
+
+
+def small_send_buffer(request, client_address, *args, **kwargs):
+    # On loopback the kernel would otherwise take the whole file at once; a
+    # slow network doesn't.
+    request.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+    return OpenPadServer.process_request(srv, request, client_address, *args, **kwargs)
+
+
+srv.process_request = small_send_buffer
+slow = socket.socket()
+slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16384)
+slow.connect(("127.0.0.1", PORT))
+slow.settimeout(10)
+slow.sendall(f"GET {worker} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+t0, data = time.monotonic(), b""
+try:
+    while chunk := slow.recv(16384):
+        data += chunk
+        time.sleep(0.03)  # a slow reader: the download outlasts the deadline
+except OSError:
+    pass
+slow.close()
+del srv.process_request
+body = data.partition(b"\r\n\r\n")[2]
+check("a slow download of a big file isn't cut off",
+      time.monotonic() - t0 > S.UNTRUSTED_DEADLINE and body == open(os.path.join(ROOT, "web", worker[1:]), "rb").read(),
+      (round(time.monotonic() - t0, 1), len(body)))
 
 # One address (not this computer) can't take every slot.
 S.UNTRUSTED_DEADLINE = saved_deadline  # the usual 15 s, so nothing here runs out mid-check
@@ -1148,21 +1194,60 @@ def no_guests():
     return False
 
 
-limit = S.MAX_CONNECTIONS_PER_ADDRESS
-held = [guest_ws("203.0.113.5", i) for i in range(limit)]
-check("internet guests connect through it", all(code == 101 for _, code in held))
-check("one internet address can only hold so many connections", get_join("203.0.113.5") == 429)
-check("other internet addresses still get in", get_join("198.51.100.7") == 200)
-check("so do requests without Cloudflare's client address", get_join() == 200)
-for sock, _ in held:
-    sock.close()
-check("closing them frees their places", no_guests() and get_join("203.0.113.5") == 200)
-held = [guest_ws(f"2001:db8:0:1::{i + 1:x}", i) for i in range(limit)]
-check("IPv6 addresses count by their /64", all(code == 101 for _, code in held)
-      and get_join("2001:db8:0:1::ffff") == 429 and get_join("2001:db8:0:2::1") == 200)
-for sock, _ in held:
+# A room of guests can share one address (behind a router): their WebSockets
+# don't count toward its limit.
+no_guests()
+room = [guest_ws("203.0.113.5", i) for i in range(S.MAX_GUESTS)]
+check("a room of guests behind one address can all join", all(code == 101 for _, code in room)
+      and get_join("203.0.113.5") == 200, [code for _, code in room])
+for sock, _ in room:
     sock.close()
 no_guests()
+
+# Its other connections do count: downloads held open by not reading them.
+pg = srv.hub.nb["pages"][srv.hub.page]
+with srv.hub.lock:
+    saved_bg, pg["bg"] = pg["bg"], {"pdf": bsha, "n": 1}  # a big file guests may download
+    srv.hub._touch(pg)
+
+
+def stalled_download(client):
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sock.connect(("127.0.0.1", TP))
+    sock.sendall(f"GET /api/asset/{bsha}?g={srv.guests.tokens['v']} HTTP/1.1\r\nHost: {TH}\r\n"
+                 f"CF-Connecting-IP: {client}\r\n\r\n".encode())
+    return sock
+
+
+def settled(cond, timeout=5):
+    deadline = time.time() + timeout
+    while not cond() and time.time() < deadline:
+        time.sleep(0.05)
+    return cond()
+
+
+limit = getattr(S, "MAX_CONNECTIONS_PER_INTERNET_CLIENT", S.MAX_CONNECTIONS_PER_ADDRESS)
+held = [stalled_download("198.51.100.9") for _ in range(limit)]
+check("one internet address can only hold so many connections",
+      settled(lambda: srv._per_client.get("198.51.100.9", 0) >= limit) and get_join("198.51.100.9") == 429,
+      dict(srv._per_client))
+check("other internet addresses still get in", get_join("198.51.100.7") == 200)
+check("so do requests without Cloudflare's client address", get_join() == 200)
+for sock in held:
+    sock.close()
+check("closing them frees their places", settled(lambda: "198.51.100.9" not in srv._per_client)
+      and get_join("198.51.100.9") == 200, dict(srv._per_client))
+held = [stalled_download(f"2001:db8:0:1::{i + 1:x}") for i in range(limit)]
+counted = settled(lambda: srv._per_client.get("2001:db8:0:1::/64", 0) >= limit)
+same64, other64 = get_join("2001:db8:0:1::ffff"), get_join("2001:db8:0:2::1")
+check("IPv6 addresses count by their /64", counted and same64 == 429 and other64 == 200,
+      (counted, same64, other64, srv._active_internet, dict(srv._per_client)))
+for sock in held:
+    sock.close()
+with srv.hub.lock:
+    pg["bg"] = saved_bg
+    srv.hub._touch(pg)
 
 internet("internet-off")
 try:
@@ -1175,9 +1260,17 @@ os.environ["PATH"] = saved_path
 shutil.rmtree(fake_bin, ignore_errors=True)
 
 print("== pairing the installed app")
+srv.pairing._drop()
 info = json.loads(http("GET", f"/api/pairing?k={KEY}")[2])
-check("pairing info has the computer's name and its addresses", info.get("name") and isinstance(info.get("addresses"), list)
-      and re.fullmatch(r"\d{6}", info.get("pin", "")))
+check("pairing info has the computer's name and its addresses", info.get("name") and isinstance(info.get("addresses"), list))
+check("reading it, as the apps do right after pairing, leaves no PIN behind",
+      info.get("pin") == "" and srv.pairing.pin == "", info.get("pin"))
+info = json.loads(http("GET", f"/api/pairing?k={KEY}&pin=1")[2])
+check("a screen that shows the PIN gets one", re.fullmatch(r"\d{6}", info.get("pin", "")))
+web_dir = os.path.join(ROOT, "web")
+pin_asks = sorted(f for f in os.listdir(web_dir) if f.endswith(".js") and "/api/pairing" in open(os.path.join(web_dir, f)).read()
+                  and "pin=1" in open(os.path.join(web_dir, f)).read())
+check("only the computer's pairing screens ask for one", pin_asks == ["setup.js", "view.js"], pin_asks)
 pin, _ = srv.pairing.current()
 check("wrong PIN refused", http("POST", "/api/pair", {"Content-Type": "application/json"}, b'{"pin":"000000"}')[0] == 403
       if pin != "000000" else True)
@@ -1219,7 +1312,7 @@ check("the cap lifts after a day", not pg.locked() and re.fullmatch(r"\d{6}", pg
 real, srv.pairing = srv.pairing, pg
 pg.fails = [time.monotonic()] * PIN_FAILS_PER_DAY
 code, _, body = http("POST", "/api/pair", {"Content-Type": "application/json"}, b'{"pin":"123456"}')
-info = json.loads(http("GET", f"/api/pairing?k={KEY}")[2])
+info = json.loads(http("GET", f"/api/pairing?k={KEY}&pin=1")[2])
 check("a locked computer says so (429) and shows no PIN", code == 429 and info["locked"] and info["pin"] == "", (code, info))
 srv.pairing = real
 
@@ -1394,6 +1487,24 @@ else:
                "layout": {"t": N.now_ms() + 10, "sections": [{**s, "pages": [x for x in s["pages"] if x != lp_id]} for s in lay["sections"]]}}})
     wait_live_state()
     check("deleting the live page stops capture", srv.hub.capture is None and srv.hub.live["state"] == "idle", srv.hub.live)
+
+    # Capture ends on its own thread, after the notebook may have left the
+    # screen: its live page still gets the window's last frame.
+    for how in ("opening another notebook", "hiding the notebook"):
+        send(pad, {"t": "live", "action": "start"})
+        for _ in range(80):
+            if srv.hub.live["state"] == "live" and srv.hub.frame:
+                break
+            time.sleep(0.1)
+        live_nb, live_pid = srv.hub.nb["id"], srv.hub.live["page"]
+        if how == "hiding the notebook":
+            send(pad, {"t": "hide", "id": live_nb})
+        else:
+            send(pad, {"t": "open", "id": next(i for i in srv.store.ids() if i != live_nb and srv.store.get(i))})
+        wait_live_state()
+        bg = srv.store.get(live_nb)["pages"].get(live_pid, {}).get("bg") or {}
+        check(f"{how} while a window is live keeps its last frame on its page",
+              srv.hub.capture is None and N.SHA_RE.match(bg.get("img", "")) and not bg.get("live"), bg)
 
 print("== desktop annotation through the browser (Windows/macOS)")
 srv.hub._native = False  # as on Windows/macOS: the share window captures

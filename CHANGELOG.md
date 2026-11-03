@@ -4,6 +4,41 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.9 (2026-11-03)
+
+Fixes from a code review of the 0.7 security work.
+
+- **"Show on the computer" off no longer hides another device's notebook.**
+  With it off, the iPad and web apps used to send "take it off the screen"
+  for whatever notebook they had open, every time they opened one or
+  reconnected. So a second device, or a reconnect, could pull a notebook
+  that another iPad (or the share window) was presenting off the screen in
+  the middle of a call. Now switching it off takes off only the notebook that
+  device put there, as soon as it can reach the computer.
+- **A live window's last frame is kept when its notebook leaves the screen.**
+  Annotating a window, then hiding the notebook or opening another before
+  the capture had ended, left the window's page blank and marked "live" for
+  good. The last frame now stays on the page, as when you stop the capture.
+- **Slow connections get big files whole.** The 15-second limit for requests
+  without a key or guest link also covered sending the answer, so on a slow
+  link (mobile data through the internet link, say) pdf.js (1.4 MB) could be
+  cut off and PDF backgrounds stayed blank. The limit now covers only getting
+  the request in. Any download stops after 20 seconds without progress,
+  rather than when a whole 1 MiB piece hasn't gone out in 20 seconds.
+- **A room of internet guests behind one router can all join.** Their live
+  connections counted toward the 12 allowed per internet address, so after
+  about 12 guests from one office or classroom, the rest couldn't join. Guest
+  live connections no longer count toward that limit (at most 20 guests can
+  connect anyway). Each internet address may now hold 24 other connections,
+  and the internet 64 in total.
+- **Pairing doesn't leave a PIN behind.** Apps read the computer's name and
+  addresses right after pairing, and that made a new 10-minute PIN no screen
+  showed. Now only the computer's pairing screens make one.
+- **The presenter's pen dot no longer sticks on slow connections.** When a
+  viewer fell behind, the message that the pen was lifted could be dropped,
+  and the dot stayed on screen. Viewers now clear it whenever the notebook
+  state refreshes.
+
 ## 0.7.8 (2026-11-03)
 
 - **Security: people on the internet can't lock the iPad out.** With

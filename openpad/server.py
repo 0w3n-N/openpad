@@ -91,10 +91,15 @@ UNTRUSTED_DEADLINE = 15
 MAX_CONNECTIONS_PER_ADDRESS = 12
 # Internet guests arrive through cloudflared on a port of their own (see
 # TunnelListener) with a limit of their own, so the internet can't take the
-# slots this computer and the local network use. Each internet client may hold
-# MAX_CONNECTIONS_PER_ADDRESS of them (see internet_client).
-MAX_INTERNET_CONNECTIONS = 48
+# slots this computer and the local network use: room for every guest's
+# WebSocket plus their page and file downloads. Each internet address (see
+# internet_client) may hold MAX_CONNECTIONS_PER_INTERNET_CLIENT of them, not
+# counting guest WebSockets (MAX_GUESTS caps those): a whole room of guests can
+# share one address behind a router.
+MAX_INTERNET_CONNECTIONS = 64
+MAX_CONNECTIONS_PER_INTERNET_CLIENT = 24
 HTTP_TIMEOUT = 20
+WRITE_PIECE = 64 * 1024  # see Handler._write
 WS_TIMEOUT = 90
 WS_PING_EVERY = 25
 LAUNCH_CODE_TTL = 60
@@ -431,6 +436,7 @@ class Hub:
         self.conns: list[WSConn] = []
         self.on_change = on_change or (lambda: None)
         self.live = {"state": "idle", "page": None}
+        self.live_nb = None  # the live page's notebook (kept out of self.live, which every state carries)
         self.capture = None  # native capture (Linux portal), or
         self.source = None   # a share window streaming frames it captured in the browser
         self.frame = None
@@ -894,6 +900,7 @@ class Hub:
                 self._index()
             self.page = p["id"]
             self.live = {"state": "live", "page": p["id"]}
+            self.live_nb = self.nb["id"]
         self.send_state()
         self.broadcast({"t": "live", "state": "live"})
         self.on_change()
@@ -916,30 +923,42 @@ class Hub:
         for c in list(self.conns):
             c.send_binary(jpeg)
 
+    def _live_page(self):
+        """The live page and its notebook. That notebook may have left the
+        screen (hidden, or another one opened) before native capture, which
+        ends on its own thread, has finished."""
+        nb = self.store.get(self.live_nb) if self.live_nb else None
+        page = nb["pages"].get(self.live["page"]) if nb else None
+        return (nb, page) if page else (None, None)
+
+    def _page_changed(self, nb, page):
+        if nb is self.nb:
+            self._touch(page)
+        self.store.touch(nb["id"])
+
     def _live_resized(self, w, h):
         with self.lock:
-            page = self.nb["pages"].get(self.live["page"])
-            if not page or self.placeholder:
+            nb, page = self._live_page()
+            if not page:
                 return
             page["h"] = round(N.PAGE_W * h / w, 2)
             page["pt"] = [round(w * 0.75, 2), round(h * 0.75, 2)]
             page["t"] = N.now_ms()
-            self._touch(page)
-            self._changed()
+            self._page_changed(nb, page)
         self.send_state()
 
     def _live_ended(self, reason):
         with self.lock:
-            page = self.nb["pages"].get(self.live["page"]) if not self.placeholder else None
+            nb, page = self._live_page()
             if page:
                 # The last frame stays on the page, as an image every device syncs.
                 page["bg"] = {"img": self.store.add_asset_bytes(self.frame)} if self.frame else None
                 page["t"] = N.now_ms()
-                self._touch(page)
-                self._changed()
+                self._page_changed(nb, page)
             self.capture = None
             self.frame = None
             self.live = {"state": "idle", "page": None}
+            self.live_nb = None
         msg = {"t": "live", "state": "idle", "reason": reason if reason in ("stopped", "cancelled", "closed") else "error"}
         if msg["reason"] == "error":
             msg["error"] = str(reason)[:300]
@@ -1105,7 +1124,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(body)
+            self._write(body)
+
+    def _write(self, data):
+        """In pieces, so the socket timeout means "no progress for that long":
+        one write of a whole file must finish within it, which cuts off slow
+        but steady downloads (pdf.js is 1.4 MB)."""
+        view = memoryview(data)
+        for i in range(0, len(view), WRITE_PIECE):
+            self.wfile.write(view[i:i + WRITE_PIECE])
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, separators=(",", ":")).encode(), "application/json")
@@ -1136,7 +1163,9 @@ class Handler(BaseHTTPRequestHandler):
     def parse_request(self):
         if not super().parse_request():
             return False
-        if not self.app.admit_client(self.headers.get("CF-Connecting-IP", "")):
+        url = urlparse(self.path)
+        guest_ws = self.app.from_internet() and url.path == "/ws" and bool(self._guest(parse_qs(url.query)))
+        if not self.app.admit_client(self.headers.get("CF-Connecting-IP", ""), counted=not guest_ws):
             self.close_connection = True
             self._deny(429, "too many connections from your address")
             return False
@@ -1180,9 +1209,11 @@ class Handler(BaseHTTPRequestHandler):
                 info["proof"] = ping_proof(self.app.token, nonce)
             return self._json(info)
         if path in PAGES:
+            self.app.answering()
             return self._page(PAGES[path])
         if path in STATIC:
             f, ctype = STATIC[path]
+            self.app.answering()
             return self._send(200, f.read_bytes(), ctype, {"Cache-Control": "no-cache"})
 
         owner = self._key_ok(q)
@@ -1215,8 +1246,11 @@ class Handler(BaseHTTPRequestHandler):
             url = self.app.link(which)
             return self._send(200, qr.svg(url, border=1).encode(), "image/svg+xml") if url else self._deny(404, "no link")
         if path == "/api/pairing":
-            pin, left = self.app.pairing.current()
-            return self._json({"pin": pin, "expires": left, "locked": not pin, "addresses": self.app.addresses(), "name": socket.gethostname(),
+            # Only a screen that shows the PIN asks for one (pin=1). Apps read
+            # the rest right after pairing, and mustn't leave a PIN no one sees.
+            pin, left = self.app.pairing.current() if q.get("pin") == ["1"] else ("", 0)
+            return self._json({"pin": pin, "expires": left, "locked": self.app.pairing.locked(),
+                               "addresses": self.app.addresses(), "name": socket.gethostname(),
                                "fingerprint": self.app.ca.fingerprint(), "app": APP_URL})
         if path == "/api/ca.crt":
             return self._send(200, self.app.ca.ca_der, "application/x-x509-ca-cert",
@@ -1462,7 +1496,7 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = fh.read(min(length, 1 << 20))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                self._write(chunk)
                 length -= len(chunk)
 
     def _websocket(self, q, owner, guest):
@@ -1805,22 +1839,23 @@ class OpenPadServer(ThreadingHTTPServer):
         """This thread's connection came through the internet link."""
         return getattr(self._conn, "internet", False)
 
-    def admit_client(self, header):
+    def admit_client(self, header, counted=True):
         """Count this thread's internet connection toward the client its
         current request is from (cloudflared reuses a connection for different
-        clients). False if that client already holds its share."""
+        clients). False if that client already holds its share. A guest's
+        WebSocket isn't `counted`."""
         c = self._conn
         if not getattr(c, "internet", False):
             return True
-        client = internet_client(header)
+        client = internet_client(header) if counted else None
         with self._active_lock:
             if client == c.client:
                 return True
-            if client and self._per_client.get(client, 0) >= MAX_CONNECTIONS_PER_ADDRESS:
+            if client and self._per_client.get(client, 0) >= MAX_CONNECTIONS_PER_INTERNET_CLIENT:
                 return False
             if c.client:
                 _uncount(self._per_client, c.client)
-            c.client = client  # None without CF-Connecting-IP: only the internet-wide cap applies
+            c.client = client  # None without CF-Connecting-IP, or uncounted: only the internet-wide cap applies
             if client:
                 self._per_client[client] = self._per_client.get(client, 0) + 1
         return True
@@ -1828,7 +1863,7 @@ class OpenPadServer(ThreadingHTTPServer):
     def trust(self, owner):
         """The request on this thread's connection showed the owner key or a
         guest link: it may stay open and take its time. Guest connections still
-        count toward their address's limit."""
+        count toward their address's limit (on the internet, all but WebSockets)."""
         c = self._conn
         if hasattr(c, "armed"):
             with self._active_lock:
@@ -1836,6 +1871,18 @@ class OpenPadServer(ThreadingHTTPServer):
 
     def trusted(self):
         return not getattr(self._conn, "armed", False)
+
+    def answering(self):
+        """This thread's request (a page or static file) has been read, and
+        only sending the answer is left. The deadline is for getting requests
+        in; lift it, so a slow download isn't cut off. The connection still
+        counts toward its address's limit, and still closes afterwards."""
+        c = self._conn
+        if getattr(c, "armed", False):
+            with self._active_lock:
+                entry = self._deadlines.pop(c.key, None)
+            if entry:
+                entry[1].close()
 
     def _watchdog(self):
         """Close untrusted connections that run past their deadline (a request

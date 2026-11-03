@@ -6,7 +6,7 @@ const K = `k=${encodeURIComponent(key)}`;
 
 async function refresh() {
   try {
-    const r = await fetch(`/api/pairing?${K}`);
+    const r = await fetch(`/api/pairing?${K}&pin=1`);
     if (!r.ok) throw new Error();
     const p = await r.json();
     $('#addr').textContent = p.addresses[0] || location.host;

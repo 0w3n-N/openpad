@@ -40,6 +40,15 @@ let sync = null;
 let ws = null;
 let live = { ready: false, peers: { views: 0, guests: 0, pads: 0 }, state: 'idle', capture: 'native' };
 let cast = localStorage.getItem('openpad.cast') !== '0';
+// The notebook this device last put on the computer's screen: switching
+// "Show on the computer" off takes only that one off, never one another
+// device (or the computer itself) is showing.
+let shown = localStorage.getItem('openpad.shown') || null;
+function setShown(id) {
+  shown = id;
+  if (id) localStorage.setItem('openpad.shown', id);
+  else localStorage.removeItem('openpad.shown');
+}
 const backgrounds = localBackgrounds(() => link);
 store.persist();
 
@@ -96,17 +105,22 @@ function onSocket(ok) {
   live.ready = false;
   if (ok) {
     sync?.run();
-    if (current) castCurrent();
+    castCurrent();
   }
   syncLiveBadge();
 }
 
 // Put the open notebook on the computer's screen (after it's synced there),
-// or, with "Show on the computer" off, make sure it isn't there: otherwise
-// edits that sync in the background would still be shown to guests.
+// or, with "Show on the computer" off, take off what this device put there
+// (as soon as it can reach the computer): otherwise edits that sync in the
+// background would still be shown to guests.
 async function castCurrent() {
-  if (!ws?.connected || !current) return;
-  if (!cast) return ws.send({ t: 'hide', id: current.id });
+  if (!ws?.connected) return;
+  if (!cast) {
+    if (shown) ws.send({ t: 'hide', id: shown });
+    return setShown(null);
+  }
+  if (!current) return;
   const id = current.id;
   await sync.push(current).catch(() => {});
   showOnComputer(id, editor.pid);
@@ -116,7 +130,9 @@ async function castCurrent() {
 // was switched off (or another notebook opened) while it was syncing: that
 // switch already sent "hide", and an "open" now would undo it.
 function showOnComputer(id, page) {
-  if (cast && ws?.connected && current?.id === id) ws.send({ t: 'open', id, page });
+  if (!cast || !ws?.connected || current?.id !== id) return;
+  ws.send({ t: 'open', id, page });
+  setShown(id);
 }
 
 function send(msg) {
@@ -706,7 +722,7 @@ async function finishConnect(attempt) {
     $('#pairdlg').close();
     toast(`Connected to ${link.name || 'your computer'}. Syncing…`);
     startLink();
-    if (current) castCurrent();
+    castCurrent();
   } catch (err) {
     $('#scanbox').hidden = true;
     $('#scanmsg').textContent = '';
