@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import selectors
 import socket
 import struct
 import subprocess
@@ -88,6 +89,11 @@ MAX_HTTP_CONNECTIONS = 96
 # so slow or idle connections from one device can't take every slot.
 UNTRUSTED_DEADLINE = 15
 MAX_CONNECTIONS_PER_ADDRESS = 12
+# Internet guests arrive through cloudflared on a port of their own (see
+# TunnelListener) with a limit of their own, so the internet can't take the
+# slots this computer and the local network use. Each internet client may hold
+# MAX_CONNECTIONS_PER_ADDRESS of them (see internet_client).
+MAX_INTERNET_CONNECTIONS = 48
 HTTP_TIMEOUT = 20
 WS_TIMEOUT = 90
 WS_PING_EVERY = 25
@@ -203,6 +209,29 @@ def _loopback(addr: str) -> bool:
         return ipaddress.ip_address(addr.split("%")[0]).is_loopback
     except ValueError:
         return False
+
+
+def internet_client(value: str) -> str | None:
+    """Who an internet request is from, by the address Cloudflare reports in
+    CF-Connecting-IP. An IPv6 address counts by its /64, which one home or
+    server usually gets whole."""
+    try:
+        ip = ipaddress.ip_address(value.strip())
+        if ip.version == 4:
+            return str(ip)
+        if ip.ipv4_mapped:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    except ValueError:
+        return None
+
+
+def _uncount(counts: dict, key):
+    left = counts.get(key, 1) - 1
+    if left > 0:
+        counts[key] = left
+    else:
+        counts.pop(key, None)
 
 
 def same(a: str, b: str) -> bool:
@@ -1029,8 +1058,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._host() in self.app.allowed_hosts()
 
     def _via_tunnel(self):
+        """From the internet: arrived on the internet link's own port, or names its host."""
         t = self.app.tunnel.host
-        return bool(t) and self._host() == t
+        return self.app.from_internet() or (bool(t) and self._host() == t)
 
     def _origin(self):
         o = self.headers.get("Origin")
@@ -1102,6 +1132,15 @@ class Handler(BaseHTTPRequestHandler):
         super().handle_one_request()
         if not self.app.trusted():
             self.close_connection = True  # no keep-alive before an owner key or guest link
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if not self.app.admit_client(self.headers.get("CF-Connecting-IP", "")):
+            self.close_connection = True
+            self._deny(429, "too many connections from your address")
+            return False
+        return True
 
     def do_HEAD(self):
         self.do_GET()
@@ -1585,6 +1624,66 @@ def qr_matrix(text):
         return []
 
 
+class TunnelListener:
+    """The port cloudflared forwards internet guests to: on this computer only,
+    and open only while the internet link runs. It's separate from the main
+    port, so a connection is known to come from the internet by the socket it
+    arrived on (not by its Host header), and the internet's connections have
+    their own limits (see OpenPadServer.process_request)."""
+
+    def __init__(self, server: "OpenPadServer"):
+        self.server = server
+        self.sock: socket.socket | None = None
+        self.lock = threading.Lock()
+
+    def open(self) -> int:
+        """Start listening (if not already); returns the port."""
+        with self.lock:
+            if not self.sock:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    if WINDOWS:
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                    s.bind(("127.0.0.1", 0))
+                    s.listen(OpenPadServer.request_queue_size)
+                except OSError:
+                    s.close()
+                    raise
+                self.sock = s
+                threading.Thread(target=self._serve, args=(s,), daemon=True).start()
+            return self.sock.getsockname()[1]
+
+    def close(self):
+        """Stop listening. Connections already made carry on until they end."""
+        with self.lock:
+            s, self.sock = self.sock, None
+        if s:
+            try:
+                s.shutdown(socket.SHUT_RDWR)  # Linux: stop listening now, not when _serve's poll returns
+            except OSError:
+                pass  # macOS and Windows refuse it on a listening socket; close is enough there
+            s.close()
+
+    def _serve(self, s):
+        # poll where there is one, as socketserver does: select() can't watch
+        # descriptors past 1023.
+        with getattr(selectors, "PollSelector", selectors.SelectSelector)() as sel:
+            sel.register(s, selectors.EVENT_READ)
+            while self.sock is s:
+                try:
+                    if not sel.select(0.5):
+                        continue
+                    request, client_address = s.accept()
+                except (OSError, ValueError):  # closed, or briefly out of file descriptors
+                    time.sleep(0.1)
+                    continue
+                try:
+                    self.server.process_request(request, client_address, internet=True)
+                except Exception:
+                    self.server.handle_error(request, client_address)
+                    self.server.shutdown_request(request)
+
+
 class OpenPadServer(ThreadingHTTPServer):
     daemon_threads = True
     # On Windows SO_REUSEADDR would let another program bind the same port and
@@ -1604,6 +1703,9 @@ class OpenPadServer(ThreadingHTTPServer):
         self._active = 0
         self._active_lock = threading.Lock()
         self._per_address: dict[str, int] = {}  # address -> its connections without the owner key
+        self._active_internet = 0
+        self._internet: set[int] = set()  # id(socket) of connections through the internet link
+        self._per_client: dict[str, int] = {}  # internet client (see internet_client) -> its connections
         # id(connection's socket) -> (deadline, a duplicate of it): the duplicate
         # still reaches the connection after TLS takes over (and detaches) the original.
         self._deadlines: dict[int, tuple[float, socket.socket]] = {}
@@ -1622,7 +1724,7 @@ class OpenPadServer(ThreadingHTTPServer):
         self._mirror_now = False
         self.guests = Guests(self.data)
         self.pairing = Pairing()
-        self.tunnel = Tunnel(port, self._mark_status)
+        self.tunnel = Tunnel(TunnelListener(self), self._mark_status)
         self.ca = LocalCA(self.data / "tls", write_private)
         self.tls = self.ca.ensure(self.tls_names())
         super().__init__((host, port), Handler)
@@ -1636,21 +1738,28 @@ class OpenPadServer(ThreadingHTTPServer):
 
     # Cap concurrent connections so idle sockets can't exhaust threads, and
     # each address's (owner key aside) so one device can't take them all.
-    def process_request(self, request, client_address):
+    # Connections through the internet link (`internet`, from TunnelListener)
+    # have a cap of their own; each internet client's is in admit_client.
+    def process_request(self, request, client_address, internet=False):
         addr = client_address[0]
-        counted = not _loopback(addr)
+        counted = not internet and not _loopback(addr)
         try:
             watch = request.dup()
         except OSError:
             self.shutdown_request(request)
             return
         with self._active_lock:
-            if self._active >= MAX_HTTP_CONNECTIONS or \
-                    (counted and self._per_address.get(addr, 0) >= MAX_CONNECTIONS_PER_ADDRESS):
-                refused = True
+            if internet:
+                refused = self._active_internet >= MAX_INTERNET_CONNECTIONS
             else:
-                refused = False
-                self._active += 1
+                refused = self._active >= MAX_HTTP_CONNECTIONS or \
+                    (counted and self._per_address.get(addr, 0) >= MAX_CONNECTIONS_PER_ADDRESS)
+            if not refused:
+                if internet:
+                    self._active_internet += 1
+                    self._internet.add(id(request))
+                else:
+                    self._active += 1
                 if counted:
                     self._per_address[addr] = self._per_address.get(addr, 0) + 1
                 self._deadlines[id(request)] = (time.monotonic() + UNTRUSTED_DEADLINE, watch)
@@ -1663,17 +1772,23 @@ class OpenPadServer(ThreadingHTTPServer):
     def process_request_thread(self, request, client_address):
         c = self._conn
         c.key, c.addr = id(request), client_address[0]
-        c.armed, c.counted = True, not _loopback(c.addr)
+        with self._active_lock:
+            c.internet = c.key in self._internet
+        c.armed, c.counted, c.client = True, not c.internet and not _loopback(c.addr), None
         try:
             super().process_request_thread(request, client_address)
         finally:
             with self._active_lock:
-                self._active -= 1
+                if c.internet:
+                    self._active_internet -= 1
+                    self._internet.discard(c.key)
+                else:
+                    self._active -= 1
                 self._release(c, uncount=True)
 
     def _release(self, c, uncount):
         """Lift this connection's deadline and, with `uncount`, take it out of
-        its address's count (caller holds _active_lock)."""
+        its address's (or internet client's) count (caller holds _active_lock)."""
         if c.armed:
             c.armed = False
             entry = self._deadlines.pop(c.key, None)
@@ -1681,11 +1796,34 @@ class OpenPadServer(ThreadingHTTPServer):
                 entry[1].close()
         if uncount and c.counted:
             c.counted = False
-            left = self._per_address.get(c.addr, 1) - 1
-            if left > 0:
-                self._per_address[c.addr] = left
-            else:
-                self._per_address.pop(c.addr, None)
+            _uncount(self._per_address, c.addr)
+        if uncount and c.client:
+            _uncount(self._per_client, c.client)
+            c.client = None
+
+    def from_internet(self):
+        """This thread's connection came through the internet link."""
+        return getattr(self._conn, "internet", False)
+
+    def admit_client(self, header):
+        """Count this thread's internet connection toward the client its
+        current request is from (cloudflared reuses a connection for different
+        clients). False if that client already holds its share."""
+        c = self._conn
+        if not getattr(c, "internet", False):
+            return True
+        client = internet_client(header)
+        with self._active_lock:
+            if client == c.client:
+                return True
+            if client and self._per_client.get(client, 0) >= MAX_CONNECTIONS_PER_ADDRESS:
+                return False
+            if c.client:
+                _uncount(self._per_client, c.client)
+            c.client = client  # None without CF-Connecting-IP: only the internet-wide cap applies
+            if client:
+                self._per_client[client] = self._per_client.get(client, 0) + 1
+        return True
 
     def trust(self, owner):
         """The request on this thread's connection showed the owner key or a

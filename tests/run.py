@@ -147,8 +147,8 @@ RUN = os.path.join(os.environ["XDG_RUNTIME_DIR"], "openpad")
 # --------------------------------------------------------------------------- clients
 
 
-def http(method, path, headers=None, body=None, host=None):
-    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+def http(method, path, headers=None, body=None, host=None, port=None):
+    s = socket.create_connection(("127.0.0.1", port or PORT), timeout=10)
     h = {"Host": host or f"127.0.0.1:{PORT}", "Connection": "close", **(headers or {})}
     if body is not None:
         h["Content-Length"] = str(len(body))
@@ -171,12 +171,13 @@ def http(method, path, headers=None, body=None, host=None):
     return code, hdrs, rest
 
 
-def ws(path, origin=None, host=None, legacy=False):
+def ws(path, origin=None, host=None, legacy=False, port=None, headers=None):
     if not legacy and path.startswith("/ws"):
         path += ("&" if "?" in path else "?") + "v=5"  # the protocol version current clients send
-    s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+    s = socket.create_connection(("127.0.0.1", port or PORT), timeout=5)
     k = base64.b64encode(os.urandom(16)).decode()
     extra = f"Origin: {origin}\r\n" if origin else ""
+    extra += "".join(f"{h}: {v}\r\n" for h, v in (headers or {}).items())
     s.sendall(f"GET {path} HTTP/1.1\r\nHost: {host or f'127.0.0.1:{PORT}'}\r\nUpgrade: websocket\r\n"
               f"Connection: Upgrade\r\nSec-WebSocket-Key: {k}\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n".encode())
     buf = b""
@@ -1074,6 +1075,104 @@ info = json.loads(http("GET", f"/api/info?k={KEY}")[2])
 check("internet guest links use the tunnel", info["guests"]["iw"] == f"https://{TH}/join#w={W}")
 srv.tunnel.url, srv.tunnel.state = None, "off"
 check("the tunnel host is forgotten when it stops", http("GET", "/join", host=TH)[0] == 421)
+
+print("== the internet link has its own port and connection limits")
+# A stand-in for cloudflared: reports a tunnel address, notes where it was
+# told to forward, and waits to be stopped.
+fake_bin = tempfile.mkdtemp()
+fake_args = os.path.join(fake_bin, "args")
+with open(os.path.join(fake_bin, "cloudflared"), "w") as f:
+    f.write(f"#!{sys.executable}\nimport sys, time\n"
+            f"with open({fake_args!r}, 'w') as f: f.write(' '.join(sys.argv[1:]))\n"
+            f"print('INF |  https://{TH}  |', file=sys.stderr, flush=True)\n"
+            "time.sleep(600)\n")
+os.chmod(os.path.join(fake_bin, "cloudflared"), 0o755)
+saved_path = os.environ["PATH"]
+os.environ["PATH"] = fake_bin + os.pathsep + saved_path
+
+
+def internet(action):
+    http("POST", f"/api/guests?k={KEY}", {"Content-Type": "application/json"}, json.dumps({"action": action}).encode())
+
+
+internet("internet-on")
+for _ in range(50):
+    if srv.tunnel.state == "on" and os.path.exists(fake_args):
+        break
+    time.sleep(0.1)
+m = re.search(r"--url http://127\.0\.0\.1:(\d+)", open(fake_args).read()) if os.path.exists(fake_args) else None
+TP = int(m.group(1)) if m else PORT
+listening = getattr(getattr(srv.tunnel, "listener", None), "sock", None)
+check("cloudflared forwards to a port of its own, on this computer only",
+      TP != PORT and listening is not None and listening.getsockname() == ("127.0.0.1", TP), TP)
+check("guests get in through it", http("GET", "/join", host=TH, port=TP)[0] == 200)
+check("everything through it is treated as the internet, whatever its Host header",
+      http("GET", f"/api/info?k={KEY}", port=TP)[0] == 404 and http("GET", "/", port=TP)[0] == 404
+      and ws(f"/ws?role=pad&k={KEY}", port=TP)[1] == 403)
+
+flood = []
+for _ in range(S.MAX_HTTP_CONNECTIONS):  # what many internet requests at once become
+    try:
+        flood.append(socket.create_connection(("127.0.0.1", TP), timeout=2))
+    except OSError:
+        break
+time.sleep(0.5)
+extra = socket.create_connection(("127.0.0.1", TP))
+check("the internet can only hold so many connections at once", hangs_up(extra, 2))
+check("and none of the ones this computer and the local network use",
+      http("GET", "/app")[0] == 200 and not hangs_up(from_lan("10.0.0.9"), 0.5))
+for sock in flood + [extra, peers[-1]]:
+    sock.close()
+time.sleep(0.5)
+
+ic = getattr(S, "internet_client", lambda value: None)
+check("Cloudflare's client address is read strictly",
+      ic(" 203.0.113.5 ") == "203.0.113.5" and ic("::ffff:203.0.113.5") == "203.0.113.5"
+      and ic("2001:db8:0:1::7") == "2001:db8:0:1::/64" and ic("") is None and ic("203.0.113.5, 10.0.0.1") is None)
+
+
+def guest_ws(client, n):
+    return ws(f"/ws?g={W}&me=internet-guest-{n:02d}-0123456789", origin=f"https://{TH}", host=TH, port=TP,
+              headers={"CF-Connecting-IP": client})
+
+
+def get_join(client=None):
+    return http("GET", "/join", {"CF-Connecting-IP": client} if client else None, host=TH, port=TP)[0]
+
+
+def no_guests():
+    for _ in range(30):
+        if srv.hub.peers()["guests"] == 0:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+limit = S.MAX_CONNECTIONS_PER_ADDRESS
+held = [guest_ws("203.0.113.5", i) for i in range(limit)]
+check("internet guests connect through it", all(code == 101 for _, code in held))
+check("one internet address can only hold so many connections", get_join("203.0.113.5") == 429)
+check("other internet addresses still get in", get_join("198.51.100.7") == 200)
+check("so do requests without Cloudflare's client address", get_join() == 200)
+for sock, _ in held:
+    sock.close()
+check("closing them frees their places", no_guests() and get_join("203.0.113.5") == 200)
+held = [guest_ws(f"2001:db8:0:1::{i + 1:x}", i) for i in range(limit)]
+check("IPv6 addresses count by their /64", all(code == 101 for _, code in held)
+      and get_join("2001:db8:0:1::ffff") == 429 and get_join("2001:db8:0:2::1") == 200)
+for sock, _ in held:
+    sock.close()
+no_guests()
+
+internet("internet-off")
+try:
+    socket.create_connection(("127.0.0.1", TP), timeout=1).close()
+    port_closed = False
+except OSError:
+    port_closed = True
+check("its port closes when internet links are switched off", port_closed and srv.tunnel.state == "off")
+os.environ["PATH"] = saved_path
+shutil.rmtree(fake_bin, ignore_errors=True)
 
 print("== pairing the installed app")
 info = json.loads(http("GET", f"/api/pairing?k={KEY}")[2])

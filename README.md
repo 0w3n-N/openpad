@@ -248,8 +248,9 @@ By default the links only work on your Wi-Fi. For people elsewhere, switch on
 **Internet link** (needs cloudflared). OpenPad then opens a free Cloudflare
 quick tunnel for as long as it's on, and gives you a `trycloudflare.com` link.
 That traffic is encrypted, but it passes through Cloudflare. Only guest pages
-are reachable through it. Links last until OpenPad stops; **New links**
-disconnects everyone sooner. When nothing is open on the iPad, guests see a
+are reachable through it, and internet guests get connection slots of their
+own, so they can't crowd out your iPad. Links last until OpenPad stops;
+**New links** disconnects everyone sooner. When nothing is open on the iPad, guests see a
 waiting screen, never one of your other notebooks.
 
 ### Sync to the computer

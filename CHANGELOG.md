@@ -4,6 +4,20 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.8 (2026-11-03)
+
+- **Security: people on the internet can't lock the iPad out.** With
+  internet links on, every internet connection reached OpenPad from
+  cloudflared on this computer, so none of them counted toward the
+  12-per-device limit. Anyone who knew the internet link's address could keep
+  many requests open through it, take every slot, and keep the iPad from
+  connecting. cloudflared now forwards to a port of its own, on this computer
+  only and open only while internet links are on. Internet connections there
+  have their own limit of 48, and each internet address may hold 12 of them
+  (an IPv6 address counts by its /64). The server also tells internet traffic
+  apart by that port instead of the Host header. Noted in the Omarchy plugin
+  marketplace review.
+
 ## 0.7.7 (2026-10-31)
 
 - **Security: another device on the network can't lock the iPad out.** It

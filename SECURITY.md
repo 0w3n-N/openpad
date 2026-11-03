@@ -88,7 +88,8 @@ what the plugin does on your system.
   may hold 12 connections at once, except ones with the owner key; this
   computer's own connections are exempt. So a device on the network that
   trickles requests or leaves connections idle can't take every slot and
-  keep the iPad out.
+  keep the iPad out. Internet guests have separate slots (see Internet
+  links), so the internet can't take these either.
 - **Memory a client can make the server hold** is bounded:
   - Files, including range requests, are sent in 1 MiB pieces and never
     read whole into memory.
@@ -142,13 +143,28 @@ role) can report a sync as done.
 
 ## Internet links (optional)
 
-Off unless you switch them on. OpenPad then runs `cloudflared tunnel --url
-http://127.0.0.1:8770` with an empty config file, which gives a random
-`https://<words>.trycloudflare.com` address. Through that address the server
-only answers guest pages, guest WebSockets and the live notebook's files.
-The owner key is refused there, owner pages and APIs answer 404, and no key
-proof is given. Cloudflare terminates TLS, so Cloudflare can see that traffic.
-The tunnel stops when you switch it off or stop OpenPad.
+Off unless you switch them on. OpenPad then opens a second port, on
+127.0.0.1 only and chosen by the system, and runs `cloudflared tunnel --url
+http://127.0.0.1:<that port>` with an empty config file, which gives a random
+`https://<words>.trycloudflare.com` address. The server treats everything
+arriving on that port as coming from the internet, whatever its Host header
+says. It only answers guest pages, guest WebSockets and the live notebook's
+files there. The owner key is refused, owner pages and APIs answer 404, and no
+key proof is given. Cloudflare terminates TLS, so Cloudflare can see that
+traffic. The tunnel and its port close when you switch it off or stop
+OpenPad.
+
+Internet connections have their own limits, so they can't take the slots this
+computer and the local network use:
+- The internet can hold 48 connections at once, in total.
+- Each internet address can hold 12 of those, guests included. The address is
+  the one Cloudflare reports in `CF-Connecting-IP`. Cloudflare sets that
+  header itself, and the port can only be reached from this computer, so
+  internet visitors can't forge it. An IPv6 address counts by its /64, which
+  one home or server usually gets whole. A request without that header counts
+  only toward the total.
+- The 15-second deadline for requests without a guest link applies as on the
+  local network.
 
 ## Other users on the same computer
 
