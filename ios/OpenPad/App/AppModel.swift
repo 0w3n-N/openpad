@@ -195,7 +195,7 @@ final class AppModel {
 
     /// The app is going to the background: save, sync, and write readable PDFs.
     func backgrounded() {
-        flushSave()
+        savePending()
         guard let sync, autoSync else { return }
         let task = BackgroundTask()
         task.id = UIApplication.shared.beginBackgroundTask(withName: "sync") { task.end() }
@@ -353,10 +353,11 @@ final class AppModel {
             }
             liveReady = true
             let merged = merge(open, theirs)
+            let mine = digest(merged)
             notebook = merged
             if let page = m["page"] as? String, page != pageID, merged.pages[page] != nil { show(page, tell: false) } else { canvasReload() }
-            saveSoon()
-            if digest(merged) != digest(theirs), let sync { Task { try? await sync.push(merged) } }
+            if mine != digest(open) { saveSoon() }  // its copy had something new
+            if mine != digest(theirs), let sync { Task { try? await sync.push(merged) } }
         case "merge":
             guard liveReady, let open = notebook, let part = m["nb"] as? [String: Any] else { return }
             notebook = mergePartial(open, part)
@@ -392,7 +393,7 @@ final class AppModel {
     /// The Sync button on the computer: sync everything now and report back.
     private func syncForComputer() {
         guard let sync else { return }
-        flushSave()
+        savePending()
         say("Syncing with \(link?.displayName ?? "the computer")…", seconds: 30)
         Task {
             do {
@@ -525,7 +526,7 @@ final class AppModel {
     }
 
     func close(deleted: Bool = false) {
-        if !deleted { flushSave() }
+        if !deleted { savePending() }
         let id = notebook?.id
         notebook = nil
         pageID = nil
@@ -670,6 +671,16 @@ final class AppModel {
         let work = DispatchWorkItem { [weak self] in self?.flushSave() }
         saveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Save what's waiting. With nothing waiting (the notebook was only opened),
+    /// saving would date it as edited just now and move it up the library.
+    private func savePending() {
+        if saveWork != nil {
+            flushSave()
+        } else if let nb = notebook {
+            store.refreshThumbnails(nb, limit: 4)
+        }
     }
 
     func flushSave() {

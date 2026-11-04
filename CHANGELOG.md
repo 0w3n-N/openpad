@@ -4,6 +4,35 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.10 (2026-11-03)
+
+Fixes from a review of the apps' screens.
+
+- **Esc on a delete question no longer deletes.** In Safari, pressing Esc on
+  "Delete this notebook?" or "Delete this page?" went ahead with the delete if
+  the dialog before it had been answered OK, which for a notebook is always
+  (the ⋯ menu's Go button). Esc now always means no. It needed a keyboard on
+  the iPad, and the iPad app was not affected.
+- **Return confirms prompts.** It pressed Cancel: a name typed for a new
+  notebook was thrown away, and Return in the PIN field closed the pairing
+  dialog. Now it means OK, Save or Connect. On a yes/no question it still
+  can't say yes by accident.
+- **The toolbar fits every iPad.** With a section name in the pager and the
+  Live badge showing, the ⋯ menu was cut off on most iPads unless you swiped
+  the toolbar sideways, and on a phone the next-page button was too. The
+  toolbar now measures what fits instead of going by the screen's width: on
+  the iPads tested the tools stay in it, and only colors and widths move behind
+  one button when there's no room. The ⋯ menu stays on screen at any width, the
+  pager never cuts off the page number, and the three widths in that pop-over
+  no longer look the same. The guest page got the same treatment.
+- **You can type in the share window's Sync folder field.** Its letters also
+  ran keyboard shortcuts: S started saving a PDF, Y closed the panel, O opened
+  a file picker, and none of them were typed.
+- **Opening a notebook no longer counts as editing it.** In the web app and the
+  iPad app, just opening a notebook while connected dated it "just now", moved
+  it to the top of the library and made it sync again. So did leaving the app
+  with one open.
+
 ## 0.7.9 (2026-11-03)
 
 Fixes from a code review of the 0.7 security work.

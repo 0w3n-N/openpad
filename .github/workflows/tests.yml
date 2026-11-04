@@ -18,11 +18,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-gstreamer-1.0 \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gir1.2-webkit2-4.1 xvfb
       - name: Security, sync, guests and annotation tests
         run: /usr/bin/python3 -B tests/run.py
       - name: Smoke test
         run: /usr/bin/python3 -B tests/smoke.py
+      - name: The web pages in WebKit (Safari's engine)
+        env:
+          # Runners can't run WebKit's sandbox; this only loads the test's own server.
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+        run: xvfb-run -a /usr/bin/python3 -B tests/gui.py
 
   smoke:
     name: ${{ matrix.os }}, Python ${{ matrix.python }}

@@ -5,7 +5,7 @@ import { COLORS, buildPDF, drawStroke, pdfInfo, pdfName, savePDF, shapePressure 
 import { Editor } from './editor.js';
 import { ConnectError, Link, Sync, importAsset, localBackgrounds, socket } from './link.js';
 import { cameraAvailable, scan } from './scan.js';
-import { fitToolbar } from './ui.js';
+import { closeOnCancel, fitToolbar, showDialog } from './ui.js';
 import { blankPage, digest, mergeInto, newId, newNotebook, normalize, now, order, sectionOf } from './model.js';
 import * as store from './store.js';
 
@@ -176,12 +176,16 @@ function onMessage(msg) {
     }
     live.ready = true;
     syncLiveBadge();
-    mergeInto(current, normalize(msg.nb));
+    const nb = current;
+    const before = digest(nb);
+    mergeInto(nb, normalize(msg.nb));
     editor.refresh();
-    if (msg.page && msg.page !== editor.pid && current.pages[msg.page]) editor.show(msg.page, true);
-    saveSoon(null);
-    // Anything the computer's copy lacks (edits made offline) goes over HTTP.
-    Promise.all([digest(current), digest(normalize(msg.nb))]).then(([a, b]) => a !== b && sync?.push(current));
+    if (msg.page && msg.page !== editor.pid && nb.pages[msg.page]) editor.show(msg.page, true);
+    Promise.all([before, digest(nb), digest(normalize(msg.nb))]).then(([was, now, theirs]) => {
+      if (current !== nb) return;
+      if (now !== was) saveSoon(null, false, false); // its copy had something new
+      if (now !== theirs) sync?.push(nb); // anything it lacks (edits made offline) goes over HTTP
+    });
     return;
   }
   if (!live.ready || !current || !cast) return;
@@ -398,19 +402,24 @@ editor.onpointer = () => closePops();
 const dirtyPages = new Set();
 let saveTimer = 0;
 let structural = false;
-function saveSoon(pages, isStructural = false) {
+let edited = false; // someone wrote in it, as opposed to catching up with the computer's copy
+function saveSoon(pages, isStructural = false, isEdit = true) {
   if (pages === null) structural = true;
   else pages.forEach((id) => dirtyPages.add(id));
   if (isStructural) structural = true;
+  if (isEdit) edited = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 400);
 }
 async function flushSave() {
-  if (!current) return;
+  // Nothing waiting (it was only opened, or the app is going away): saving
+  // would date it as edited just now and move it up the library.
+  if (!current || !(structural || dirtyPages.size)) return;
   const pages = structural ? null : [...dirtyPages];
+  const touched = edited;
   dirtyPages.clear();
-  structural = false;
-  await store.saveNotebook(current, pages, { touched: true }).catch((e) => toast('Saving failed: ' + e.message, 5000));
+  structural = edited = false;
+  await store.saveNotebook(current, pages, { touched }).catch((e) => toast('Saving failed: ' + e.message, 5000));
 }
 
 function onop(msg, info = {}) {
@@ -446,6 +455,8 @@ async function openNotebook(id) {
 async function closeNotebook(deleted = false) {
   clearTimeout(saveTimer);
   if (current && !deleted) await flushSave();
+  dirtyPages.clear();
+  structural = edited = false;
   const id = current?.id;
   current = null;
   live.ready = false;
@@ -461,9 +472,9 @@ function renderPager() {
   if (!current) return;
   const pos = editor.position();
   const sec = pos.section;
-  $('#pageno').textContent = sec && current.layout.sections.length > 1
-    ? `${sec.title.slice(0, 14)} · ${pos.inSection + 1}/${sec.pages.length}`
-    : `${pos.index + 1} / ${pos.count}`;
+  const named = sec && current.layout.sections.length > 1;
+  $('#pagesec').textContent = named ? `${sec.title.slice(0, 14)} · ` : '';
+  $('#pagenum').textContent = named ? `${pos.inSection + 1}/${sec.pages.length}` : `${pos.index + 1} / ${pos.count}`;
   $('#prev').disabled = pos.index <= 0;
   $('#next').disabled = pos.index >= pos.count - 1;
   $$('[data-paper]').forEach((b) => b.classList.toggle('on', b.dataset.paper === (editor.page?.paper || 'blank')));
@@ -584,7 +595,7 @@ function ask({ title, text = '', value = null, select = null, ok = 'OK' }) {
   if (value !== null) input.value = value;
   if (select) sel.replaceChildren(...select.map(([v, label]) => Object.assign(document.createElement('option'), { value: v, textContent: label })));
   $('#askok').textContent = ok;
-  dlg.showModal();
+  showDialog(dlg);
   if (value !== null) setTimeout(() => input.select(), 50);
   return new Promise((res) => {
     dlg.onclose = () => {
@@ -738,7 +749,8 @@ async function finishConnect(attempt) {
   }
 }
 
-$('#pairgo').onclick = () => {
+$('#pairform').onsubmit = (e) => {
+  e.preventDefault(); // the Connect button or Return: the dialog stays open while it connects
   lastCode = null;
   finishConnect(() => Link.pair($('#pairaddr').value, $('#pairpin').value));
 };
@@ -924,7 +936,7 @@ $('#m-import').onclick = () => {
 $('#m-export').onclick = async () => {
   closePops();
   const dlg = $('#exportdlg');
-  dlg.showModal();
+  showDialog(dlg);
   dlg.onclose = () => {
     if (dlg.returnValue !== 'save') return;
     const what = dlg.querySelector('input[name=what]:checked').value;
@@ -1032,10 +1044,13 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.se
 document.addEventListener('dblclick', (e) => e.preventDefault());
 $('#stylebtn').style.setProperty('--c', editor.color);
 fitToolbar({
+  bar: $('#bar'),
   button: $('#stylebtn'),
   pop: $('#stylepop'),
-  levels: [[700, [$('#tools')]], [1150, [$('#colors'), $('#widths')]]],
+  levels: [[$('#colors'), $('#widths')], [$('#tools')], [$('#undogroup')], [$('#addpage')]],
+  watch: [$('#pager'), $('#menubtn').parentElement],
 });
+closeOnCancel();
 
 editor.syncUndo();
 renderLibrary();

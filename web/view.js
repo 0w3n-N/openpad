@@ -682,6 +682,7 @@ $('#pair').onclick = (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
+  if (k !== 'escape' && e.target.closest?.('input')) return; // typing the sync folder, not a shortcut
   if (k === 'q') togglePair();
   else if (k === 'i') toggleGuests();
   else if (k === 'y') toggleSync();

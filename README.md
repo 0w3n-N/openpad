@@ -414,9 +414,12 @@ and what isn't.
 - `python3 -B tests/run.py` runs the security, sync, guest and annotation tests
   on Linux (GStreamer for annotation; Node checks that `web/model.js` and
   `openpad/notebook.py` merge identically).
+- `python3 -B tests/gui.py` tries the web pages in WebKit, Safari's engine, with
+  real key presses (needs WebKitGTK and a display, or `xvfb-run`; skipped
+  without them)
 - `python3 -B tests/smoke.py` runs on Linux, macOS and Windows: it starts the
   real server through the CLI, pairs, connects and stops it.
-- GitHub Actions runs both, and publishes `web/` to GitHub Pages for the
+- GitHub Actions runs them all, and publishes `web/` to GitHub Pages for the
   installed app (`.github/workflows/`). `ios.yml` tests the iPad app in a
   simulator and, when the version is new, publishes the release (see
   [CHANGELOG.md](CHANGELOG.md)).

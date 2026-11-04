@@ -5,7 +5,7 @@
 import { Backgrounds, COLORS, buildPDF, pdfName, savePDF } from './ink.js';
 import { Editor } from './editor.js';
 import { PROTOCOL, socket } from './link.js';
-import { fitToolbar } from './ui.js';
+import { closeOnCancel, fitToolbar, showDialog } from './ui.js';
 import { mergeInto, normalize, order, sectionOf } from './model.js';
 
 const $ = (s) => document.querySelector(s);
@@ -192,7 +192,7 @@ $('#savehint').textContent = navigator.maxTouchPoints > 1
 $('#savebtn').onclick = () => {
   if (!nb) return;
   const dlg = $('#exportdlg');
-  dlg.showModal();
+  showDialog(dlg);
   dlg.onclose = async () => {
     if (dlg.returnValue !== 'save') return;
     const what = dlg.querySelector('input[name=what]:checked').value;
@@ -227,9 +227,12 @@ if (!canWrite) setTool('hand');
 document.addEventListener('dblclick', (e) => e.preventDefault());
 $('#stylebtn').style.setProperty('--c', editor.color);
 fitToolbar({
+  bar: $('#bar'),
   button: $('#stylebtn'),
   pop: $('#stylepop'),
-  levels: [[640, [$('#tools'), $('#undogroup')]], [1000, [$('#colors'), $('#widths')]]],
+  levels: [[$('#colors'), $('#widths')], [$('#tools')], [$('#undogroup')]],
+  watch: [$('#pager'), $('#savebtn').parentElement],
 });
+closeOnCancel();
 editor.syncUndo();
 editor.layout();

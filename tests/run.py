@@ -978,6 +978,22 @@ for sock in (pad, view):  # past the "nothing shown" state from hiding
     while recv_until(sock, "state", timeout=10).get("nb", {}).get("id") != shown:
         pass
 
+print("== the web pages' dialogs and shortcuts (tests/gui.py tries them in a browser)")
+for name in ("app.html", "join.html"):
+    html = open(os.path.join(ROOT, "web", name)).read()
+    cancels = re.findall(r'<button[^>]*value="cancel"[^>]*>', html)
+    check(f"Return can't press Cancel ({name})", cancels and all('type="button"' in b for b in cancels), cancels)
+ui_js = open(os.path.join(ROOT, "web", "ui.js")).read()
+join_js = open(os.path.join(ROOT, "web", "join.js")).read()
+check("a dialog forgets the last answer before it opens", "dlg.returnValue = '';\n  dlg.showModal();" in ui_js
+      and app_js.count("showDialog(dlg)") == 2 and join_js.count("showDialog(dlg)") == 1)
+check("typing in the share window isn't a shortcut",
+      "if (k !== 'escape' && e.target.closest?.('input')) return;" in open(os.path.join(ROOT, "web", "view.js")).read())
+check("the toolbars measure what fits", "bar.scrollWidth > bar.clientWidth" in ui_js
+      and not re.search(r"levels: \[\[\d", app_js + join_js))
+check("only a pending change saves a notebook",
+      "if (!current || !(structural || dirtyPages.size)) return;" in app_js and "if mine != digest(open) { saveSoon() }" in swift)
+
 print("== slow or idle connections can't take every slot")
 import openpad.server as S  # noqa: E402
 

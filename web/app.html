@@ -73,14 +73,14 @@
     <button data-w="3.5" class="on" title="Medium"><i class="w-m"></i></button>
     <button data-w="6.5" title="Bold"><i class="w-l"></i></button>
   </div>
-  <div class="group">
+  <div class="group" id="undogroup">
     <button id="undo" title="Undo"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
     <button id="redo" title="Redo"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
   </div>
   <div class="spacer"></div>
   <div class="group" id="pager">
     <button id="prev" title="Previous page"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
-    <span id="pageno">1 / 1</span>
+    <span id="pageno"><span id="pagesec"></span><span id="pagenum">1 / 1</span></span>
     <button id="next" title="Next page"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
     <button id="addpage" title="New page after this one"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
@@ -186,11 +186,11 @@
       <summary>Enter the address and PIN instead</summary>
       <label class="field"><span>Address</span><input id="pairaddr" placeholder="192.168.1.20:8770" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url"></label>
       <label class="field"><span>PIN</span><input id="pairpin" placeholder="6 digits" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
-      <button type="button" class="btn primary" id="pairgo">Connect</button>
+      <button class="btn primary" id="pairgo">Connect</button>
     </details>
     <p id="pairerr" class="error" hidden></p>
     <div class="actions">
-      <button class="btn" value="cancel" formnovalidate>Close</button>
+      <button type="button" class="btn" value="cancel">Close</button>
     </div>
   </form>
 </dialog>
@@ -203,7 +203,7 @@
     <label class="row"><span>Whole notebook</span><input type="radio" name="what" value="all"></label>
     <p class="muted small">You choose where it's saved: on the iPad, pick Save to Files and a folder.</p>
     <div class="actions">
-      <button class="btn" value="cancel">Cancel</button>
+      <button type="button" class="btn" value="cancel">Cancel</button>
       <button class="btn primary" value="save">Save</button>
     </div>
   </form>
@@ -237,7 +237,7 @@
     <input id="askinput" autocomplete="off">
     <select id="askselect" hidden></select>
     <div class="actions">
-      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button type="button" class="btn" value="cancel">Cancel</button>
       <button class="btn primary" id="askok" value="ok">OK</button>
     </div>
   </form>
