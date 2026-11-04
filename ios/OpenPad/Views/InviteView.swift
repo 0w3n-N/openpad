@@ -10,6 +10,8 @@ struct InviteView: View {
     @State private var canDraw = true
     @State private var error: String?
     @State private var working = false
+    @State private var confirmNewLinks = false
+    @State private var copied = false
 
     private var guests: [String: Any] { info["guests"] as? [String: Any] ?? [:] }
     private var internet: [String: Any] { guests["internet"] as? [String: Any] ?? [:] }
@@ -40,15 +42,19 @@ struct InviteView: View {
                         }
                         Text(url).font(.footnote.monospaced()).textSelection(.enabled)
                         ShareLink("Share link", item: URL(string: url)!)
-                        Button("Copy link", systemImage: "doc.on.doc") {
+                        // Says so here: a notice from the model would be behind this sheet.
+                        Button(copied ? "Link copied" : "Copy link", systemImage: copied ? "checkmark" : "doc.on.doc") {
                             UIPasteboard.general.string = url
-                            model.say("Link copied")
+                            copied = true
+                            Task {
+                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                copied = false
+                            }
                         }
-                    } else if let error {
-                        Text(error).foregroundStyle(.red)
-                    } else {
+                    } else if error == nil {
                         ProgressView()
                     }
+                    if let error { Text(error).foregroundStyle(.red) }
                 }
                 Section {
                     Toggle("Internet link (for people on other networks)", isOn: Binding(get: { internetOn || internet["state"] as? String == "starting" },
@@ -57,7 +63,12 @@ struct InviteView: View {
                     Text(internetNote).font(.footnote).foregroundStyle(.secondary)
                 }
                 Section {
-                    Button("New links (disconnects everyone)", role: .destructive) { act("rotate") }
+                    Button("New links (disconnects everyone)", role: .destructive) { confirmNewLinks = true }
+                        .confirmationDialog("Make new links?", isPresented: $confirmNewLinks, titleVisibility: .visible) {
+                            Button("New links", role: .destructive) { act("rotate") }
+                        } message: {
+                            Text("Everyone using the current links is disconnected.")
+                        }
                 }
             }
             .navigationTitle("Invite people")
@@ -96,6 +107,7 @@ struct InviteView: View {
     private func act(_ action: String) {
         guard let link = model.link else { return }
         working = true
+        error = nil
         Task {
             defer { working = false }
             do {

@@ -5,7 +5,7 @@ import { COLORS, buildPDF, drawStroke, pdfInfo, pdfName, savePDF, shapePressure 
 import { Editor } from './editor.js';
 import { ConnectError, Link, Sync, importAsset, localBackgrounds, socket } from './link.js';
 import { cameraAvailable, scan } from './scan.js';
-import { closeOnCancel, fitToolbar, showDialog } from './ui.js';
+import { closeOnCancel, fitToolbar, placeToast, showDialog } from './ui.js';
 import { blankPage, digest, mergeInto, newId, newNotebook, normalize, now, order, sectionOf } from './model.js';
 import * as store from './store.js';
 
@@ -29,6 +29,7 @@ function toast(text, ms = 2500) {
   const t = $('#toast');
   t.textContent = text;
   t.hidden = false;
+  placeToast(t);
   clearTimeout(toastTimer);
   if (ms) toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
@@ -75,7 +76,10 @@ function startLink() {
   sync = new Sync(link, {
     backgrounds,
     busy: () => !!editor?.drawing,
-    onstatus: setPill,
+    onstatus: (state, detail) => {
+      setPill(state, detail);
+      if (state === 'ok' && !current) renderLibrary(); // the cards' sync dots
+    },
     onchanged: (id, nb) => {
       if (current && id === current.id) {
         if (!nb) return closeNotebook(true);
@@ -782,6 +786,7 @@ let inviteKind = 'w';
 async function openInvite() {
   closePops();
   if (!link) return toast('Pair with a computer first: guests connect to it.');
+  $('#invshare').hidden = !navigator.share; // only on a secure page, and not in every browser
   $('#invitedlg').showModal();
   await refreshInvite();
 }
@@ -858,7 +863,11 @@ function setTool(t) {
 $$('[data-tool]').forEach((b) => (b.onclick = (e) => {
   if (b.dataset.tool === 'shape' && editor.tool === 'shape') {
     e.stopPropagation();
-    return togglePop('#shapes');
+    const at = b.getBoundingClientRect(); // before the pop-over it may be in closes
+    togglePop('#shapes');
+    const pop = $('#shapes');
+    pop.style.left = `${Math.max(8, Math.min(at.left, innerWidth - pop.offsetWidth - 8))}px`;
+    return;
   }
   setTool(b.dataset.tool);
 }));
@@ -925,7 +934,10 @@ $('#menubtn').onclick = (e) => {
   togglePop('#menu');
 };
 document.addEventListener('pointerdown', (e) => {
-  if (!e.target.closest('#menu, #menubtn, #shapes, #shapebtn, #stylepop, #stylebtn')) closePops();
+  // Each pop-over closes on a press anywhere but itself and its own button.
+  if (!e.target.closest('#menu, #menubtn')) $('#menu').hidden = true;
+  if (!e.target.closest('#shapes, #shapebtn')) $('#shapes').hidden = true;
+  if (!e.target.closest('#stylepop, #stylebtn')) $('#stylepop').hidden = true;
 });
 
 $('#m-import').onclick = () => {
@@ -991,6 +1003,7 @@ $('#m-rename').onclick = async () => {
   current.metaT = now();
   onop({ t: 'merge', nb: { id: current.id, title: current.title, size: current.size, folder: current.folder ?? '', metaT: current.metaT, goneP: [], pages: {} } }, { structural: true });
   document.title = `${current.title} · OpenPad`;
+  if (!$('#side').hidden) renderSide();
 };
 $('#m-settings').onclick = openSettings;
 $('#l-settings').onclick = openSettings;
@@ -1013,7 +1026,8 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     e.shiftKey ? editor.doRedo() : editor.doUndo();
-  } else if (e.key === 'ArrowRight' || e.key === 'PageDown') editor.goto(1);
+  } else if (mod || e.altKey) return; // the browser's: Cmd+P prints, it doesn't pick the pen
+  else if (e.key === 'ArrowRight' || e.key === 'PageDown') editor.goto(1);
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp') editor.goto(-1);
   else if (e.key === 'e') setTool('eraser');
   else if (e.key === 'p') setTool('pen');
@@ -1051,6 +1065,7 @@ fitToolbar({
   watch: [$('#pager'), $('#menubtn').parentElement],
 });
 closeOnCancel();
+document.addEventListener('close', () => placeToast($('#toast')), true);
 
 editor.syncUndo();
 renderLibrary();

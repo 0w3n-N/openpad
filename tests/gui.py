@@ -87,7 +87,8 @@ srv = OpenPadServer("127.0.0.1", PORT)
 KEY = srv.token
 for nb in (book("Toolbar", [("Ch 1", 3), ("Ch 2", 1)]), book("Long names", [("Laplace transforms", 3), ("Homework", 1)]),
            book("Delete pages", [("Notes", 4)]), book("Delete me", [("Notes", 1)]),
-           book("Only opened", [("Notes", 2)]), book("Really edited", [("Notes", 2)])):
+           book("Only opened", [("Notes", 2)]), book("Really edited", [("Notes", 2)]), book("Renamed here", [("Notes", 1)]),
+           book("An" + "Unbroken" * 12, [("Notes", 1)])):
     srv.store.put(nb)
 srv.save()
 threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -318,6 +319,113 @@ return { over: $('#bar').scrollWidth - $('#bar').clientWidth, right: Math.round(
 """, (w, h))
     check(f"the guest page's toolbar fits at {w}", r.get("over") == 0 and r.get("right", 9999) <= w, r)
 
+print("== the ⋯ menu")
+r = page(APP, """
+await openBook('Toolbar');
+$('#menubtn').click();
+await sleep(100);
+const box = (s) => { const b = $(s).getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, h: b.height }; };
+const eng = box('#papers [data-paper=eng]');
+const menu = box('#menu');
+return { invite: box('#m-invite'), rename: box('#m-rename'), eng, menu, vh: innerHeight };
+""", (1024, 768))
+check("every item is the same size", r.get("invite", {}).get("h") == r.get("rename", {}).get("h") and r.get("invite", {}).get("left") == r.get("rename", {}).get("left"), r.get("invite"))
+check("the paper choices stay inside it", r.get("eng", {}).get("right", 9999) <= r.get("menu", {}).get("right", 0), r.get("eng"))
+r = page(APP, """
+await openBook('Toolbar');
+$('#menubtn').click();
+await sleep(100);
+const m = $('#menu');
+const last = $('#m-settings');
+last.scrollIntoView();
+await sleep(50);
+const box = m.getBoundingClientRect();
+const end = last.getBoundingClientRect();
+return { bottom: box.bottom, vh: innerHeight, scrolls: m.scrollHeight > m.clientHeight, lastBottom: end.bottom };
+""", (812, 375))
+check("in a short window it scrolls instead of running off the screen",
+      r.get("scrolls") is True and r.get("bottom", 9999) <= r.get("vh", 0) and r.get("lastBottom", 9999) <= r.get("vh", 0), r)
+
+print("== toasts and pop-overs")
+r = page(APP, """
+await openBook('Toolbar');
+$('#menubtn').click();
+$('#m-invite').click();
+await until(() => $('#invlink').textContent);
+const shareHidden = $('#invshare').hidden;
+$('#invcopy').click();
+await until(() => !$('#toast').hidden);
+const t = $('#toast').getBoundingClientRect();
+const hit = document.elementFromPoint(t.left + t.width / 2, t.top + t.height / 2);
+const onTop = hit === $('#toast');
+$('#invitedlg').close();
+await sleep(100);
+const back = $('#toast').parentElement === document.body;
+$('#toast').textContent = 'Something long enough to need more than half of a narrow screen to fit on one line of text';
+await sleep(50);
+return { onTop, back, shareHidden, hasShare: !!navigator.share, width: $('#toast').getBoundingClientRect().width, vw: innerWidth };
+""", (600, 800))
+check("a toast shows above an open dialog", r.get("onTop") is True, r)
+check("and comes back out when it closes", r.get("back") is True, r)
+check("the Share button only shows where sharing works", r.get("shareHidden") == (not r.get("hasShare")), r)
+check("a toast can use the screen's width", r.get("width", 0) > r.get("vw", 9999) * 0.6, r)
+r = page(APP, """
+await openBook('Toolbar');
+const press = (el) => { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); el.click(); };
+press($('#menubtn'));
+await sleep(50);
+press($('#stylebtn'));
+await sleep(50);
+const both = !$('#menu').hidden && !$('#stylepop').hidden;
+press($('#stylebtn'));
+$('[data-tool=shape]').click();
+await sleep(50);
+press($('#stylebtn'));
+await sleep(50);
+$('[data-tool=shape]').click();
+await sleep(100);
+const s = $('#shapes').getBoundingClientRect();
+return { both, shapesOpen: !$('#shapes').hidden, right: s.right, left: s.left, vw: innerWidth };
+""", (375, 812))
+check("opening one pop-over closes another", r.get("both") is False, r)
+check("the Shapes pop-over stays on a phone's screen", r.get("shapesOpen") is True and r.get("right", 9999) <= r.get("vw", 0) and r.get("left", -1) >= 0, r)
+r = page(APP, """
+await library();
+card('An' + 'Unbroken'.repeat(12)).querySelector('.more').click();
+await sleep(100);
+const d = $('#askdlg');
+return { over: d.scrollWidth - d.clientWidth };
+""", (375, 812))
+check("a long title stays inside its dialog", r.get("over") == 0, r)
+r = page(APP, """
+await openBook('Renamed here');
+$('#sidebtn').click();
+await sleep(100);
+const before = $('#nbtitle').textContent;
+$('#menubtn').click();
+$('#m-rename').click();
+await sleep(100);
+$('#askinput').value = 'Renamed now';
+$('#askok').click();
+await sleep(200);
+const after = $('#nbtitle').textContent;
+$('[data-tool=eraser]').click();
+for (const key of ['p', 's']) document.dispatchEvent(new KeyboardEvent('keydown', { key, metaKey: true, ctrlKey: true, bubbles: true }));
+const tool = $('[data-tool].on').dataset.tool;
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
+const plain = $('[data-tool].on').dataset.tool;
+$('#sidebtn').click();
+$('#back').click();
+await until(() => !$('#library').hidden);
+await sleep(2500);
+const dot = card('Renamed now').querySelector('.syncdot').className;
+return { before, after, tool, plain, dot };
+""")
+check("renaming updates the sidebar", r.get("before") == "Renamed here" and r.get("after") == "Renamed now", r)
+check("Cmd+P and Cmd+S are left to the browser", r.get("tool") == "eraser", r)
+check("a plain P still picks the pen", r.get("plain") == "pen", r)
+check("the library's sync dot clears once it has synced", "dirty" not in r.get("dot", "dirty"), r)
+
 print("== the share window: typing isn't a shortcut")
 r = page(f"/view#c={srv.new_launch_code()}", """
 await until(() => $('#b-sync').onclick);
@@ -338,6 +446,28 @@ check("letters go into the Sync folder field", r.get("typed", {}).get("value") =
 check("and do nothing else", r.get("typed", {}).get("open") is True and not r["typed"]["pair"] and not r["typed"]["guests"] and not r["typed"]["toast"], r.get("typed"))
 check("Esc in the field still closes the panel", r.get("escaped") is True)
 check("shortcuts still work outside it", r.get("shortcut") is True)
+r = page(f"/view#c={srv.new_launch_code()}", """
+await until(() => $('#b-sync').onclick);
+const top = () => document.elementFromPoint(innerWidth / 2, innerHeight / 2).closest('.overlay')?.id;
+$('#b-sync').click();
+await sleep(200);
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', bubbles: true }));
+await sleep(200);
+const invite = top();
+$('#b-sync').click();
+await sleep(200);
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'q', bubbles: true }));
+await sleep(200);
+const pair = top();
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+await sleep(100);
+document.body.classList.add('awake');
+const c = $('#controls').getBoundingClientRect();
+return { invite, pair, left: c.left, right: c.right, vw: innerWidth };
+""", (500, 700))
+check("Invite opens over the Sync panel, not under it", r.get("invite") == "guests", r)
+check("so does Pair", r.get("pair") == "pair", r)
+check("the controls fit a narrow window", r.get("left", -1) >= 0 and r.get("right", 9999) <= r.get("vw", 0), r)
 
 print("== opening a notebook isn't editing it")
 r = page(APP, """

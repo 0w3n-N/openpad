@@ -54,6 +54,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   padding: 10px 16px;
   border-radius: var(--radius);
   z-index: 50;
+  width: max-content; /* or it could only use the half of the screen right of `left` */
   max-width: calc(100vw - 32px);
 }
 [hidden] { display: none !important; }
@@ -142,15 +143,18 @@ button:disabled { opacity: 0.35; cursor: default; }
   position: fixed;
   top: calc(60px + env(safe-area-inset-top));
   right: calc(8px + env(safe-area-inset-right));
-  width: 300px;
+  width: 320px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: calc(var(--radius) * 1.4);
   padding: 6px;
   z-index: 20;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  max-height: calc(100vh - 68px - env(safe-area-inset-top));
+  max-height: calc(100dvh - 68px - env(safe-area-inset-top));
+  overflow-y: auto;
 }
-#menu > button, #menu .row {
+#menu > button, #m-live > button, #menu .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -160,9 +164,10 @@ button:disabled { opacity: 0.35; cursor: default; }
   border-radius: calc(var(--radius) * 0.9);
   gap: 6px;
 }
-#menu > button:active { background: var(--panel-2); }
+#menu > button:active, #m-live > button:active { background: var(--panel-2); }
+#papers { flex-wrap: wrap; }
 #menu .row button {
-  padding: 5px 8px;
+  padding: 5px 6px;
   border-radius: calc(var(--radius) * 0.7);
   font-size: 13px;
   color: var(--muted);
@@ -221,9 +226,13 @@ button:disabled { opacity: 0.35; cursor: default; }
   bottom: 14px;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
   gap: 4px;
   padding: 5px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -240,7 +249,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   font-size: 13px;
 }
 #controls button:hover { background: var(--panel-2); }
-#controls #pageno { min-width: 48px; font-size: 13px; }
+#controls #pageno { min-width: 48px; max-width: none; font-size: 13px; }
 #status { width: 8px; height: 8px; border-radius: 50%; margin: 0 8px; background: var(--muted); }
 #status.ok { background: var(--ok); }
 #status.bad { background: var(--bad); }
@@ -373,7 +382,7 @@ dialog {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 dialog::backdrop { background: rgba(10, 11, 14, 0.55); backdrop-filter: blur(4px); }
-dialog h2 { margin: 0 0 10px; font-size: 19px; }
+dialog h2 { margin: 0 0 10px; font-size: 19px; overflow-wrap: anywhere; }
 dialog h3 { margin: 18px 0 4px; font-size: 15px; }
 dialog p { margin: 0 0 10px; }
 dialog .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; }

@@ -4,6 +4,55 @@ Each version is released on GitHub with the iPad app (`OpenPad.ipa`, for
 SideStore). The computer side updates with `omarchy plugin update`. For
 versions before 0.6.0 (Inkcast, OpenPad 0.5), see the git history.
 
+## 0.7.11 (2026-11-03)
+
+The rest of the fixes from that review.
+
+Web app and share window:
+
+- **Toasts show above dialogs.** "Link copied" appeared dimmed and blurred behind
+  the Invite dialog. They can also use the screen's width now, not half of it.
+- **The ⋯ menu:** Invite, Annotate and Remove guests' ink were smaller than the
+  rest and out of line, Eng stuck out of the Paper row, and in a short window
+  the bottom of the menu couldn't be reached. It scrolls now.
+- **The Share… button only shows where sharing works.** It did nothing on pages
+  opened from the computer.
+- **The library's blue "not synced" dot clears** as soon as the sync is done,
+  rather than whenever the library was next redrawn.
+- **Pop-overs:** opening one closes another, and Shapes stays on a phone's screen.
+- **Smaller fixes:** long titles stay inside dialogs, the sidebar shows a new title
+  right after a rename, and Cmd+P or Cmd+S no longer also change the tool.
+- **Share window:** Invite and Pair open over the Sync panel, not hidden under
+  it, and its controls wrap in a narrow window rather than running off both sides.
+- **The web app's manifest** gives its icon's real size.
+
+Omarchy plugin:
+
+- **The popup's text can't spill out of its card.** A long error and a failed sync
+  could push Setup past the bottom edge. The card now grows to fit, and scrolls
+  on a very small screen.
+- **Open the share window closes the popup**, like Invite and Annotate, so the
+  new window doesn't open behind it.
+- **It says when it's busy.** Clicks during a running action (a sync, say) were
+  ignored without a word, and Invite even closed the popup.
+- **Errors clear** once you've seen them and closed the popup.
+- **Annotate does the same from the keyboard as from the mouse**: without GStreamer,
+  it offers Setup.
+- **Smaller fixes:** row titles line up, a fallback error no longer reads "could
+  not invite the whiteboard", and nothing on screen no longer reads "1 page".
+
+iPad app:
+
+- **Library cards stay in their grid cell.** A card with a thumbnail came out wider
+  than one without, and out of line. Covers also line up across a row when one
+  card's title wraps.
+- **A long section name no longer hides the page number**, and the sidebar's page
+  list follows the page you're on.
+- **Invite:** New links asks first, as the web app does, errors show even once a
+  link is on screen, and Copy link says so itself instead of behind the sheet.
+- **Narrow windows** (Slide Over, a third of the screen): the top bar's less used
+  buttons move into the ⋯ menu, so the rest still fits.
+
 ## 0.7.10 (2026-11-03)
 
 Fixes from a review of the apps' screens.

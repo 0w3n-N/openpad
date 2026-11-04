@@ -184,7 +184,7 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                         .padding(40)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 190, maximum: 250), spacing: 18)], spacing: 22) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 190, maximum: 250), spacing: 18, alignment: .top)], spacing: 22) {
                     ForEach(shown) { entry in
                         NotebookCard(entry: entry, connected: model.link != nil, busy: model.downloading.contains(entry.id))
                             .onTapGesture { model.open(entry.id) }
@@ -264,20 +264,21 @@ struct NotebookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                Group {
-                    if let cover = entry.cover, let image = model.store.thumbnail(cover) {
-                        Image(uiImage: image).resizable().scaledToFill()
-                    } else {
-                        LinearGradient(colors: [Color(.secondarySystemBackground), Color(.tertiarySystemBackground)], startPoint: .top, endPoint: .bottom)
+                // The shape comes from Color.clear: a filling image would widen the card past its grid cell.
+                Color.clear
+                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .overlay {
+                        if let cover = entry.cover, let image = model.store.thumbnail(cover) {
+                            Image(uiImage: image).resizable().scaledToFill()
+                        } else {
+                            LinearGradient(colors: [Color(.secondarySystemBackground), Color(.tertiarySystemBackground)], startPoint: .top, endPoint: .bottom)
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity)
-                .aspectRatio(3 / 4, contentMode: .fit)
-                .clipped()
-                .opacity(entry.offloaded ? 0.55 : 1)
-                .overlay(alignment: .leading) { Rectangle().fill(.tint).frame(width: 6) }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(.separator), lineWidth: 0.5))
+                    .clipped()
+                    .opacity(entry.offloaded ? 0.55 : 1)
+                    .overlay(alignment: .leading) { Rectangle().fill(.tint).frame(width: 6) }
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(.separator), lineWidth: 0.5))
                 HStack(spacing: 4) {
                     if busy { ProgressView().controlSize(.small) }
                     if entry.keep { Image(systemName: "pin.fill") }

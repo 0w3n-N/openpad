@@ -5,7 +5,7 @@
 import { Backgrounds, COLORS, buildPDF, pdfName, savePDF } from './ink.js';
 import { Editor } from './editor.js';
 import { PROTOCOL, socket } from './link.js';
-import { closeOnCancel, fitToolbar, showDialog } from './ui.js';
+import { closeOnCancel, fitToolbar, placeToast, showDialog } from './ui.js';
 import { mergeInto, normalize, order, sectionOf } from './model.js';
 
 const $ = (s) => document.querySelector(s);
@@ -36,6 +36,7 @@ function toast(text, ms = 2500) {
   const t = $('#toast');
   t.textContent = text;
   t.hidden = false;
+  placeToast(t);
   clearTimeout(toastTimer);
   if (ms) toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
@@ -216,7 +217,8 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'z' && canWrite) {
     e.preventDefault();
     e.shiftKey ? editor.doRedo() : editor.doUndo();
-  } else if (e.key === 'ArrowRight' || e.key === 'PageDown') editor.goto(1);
+  } else if (mod || e.altKey) return; // the browser's: Cmd+P prints, it doesn't pick the pen
+  else if (e.key === 'ArrowRight' || e.key === 'PageDown') editor.goto(1);
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp') editor.goto(-1);
   else if (canWrite && e.key === 'e') setTool('eraser');
   else if (canWrite && e.key === 'p') setTool('pen');
@@ -234,5 +236,6 @@ fitToolbar({
   watch: [$('#pager'), $('#savebtn').parentElement],
 });
 closeOnCancel();
+document.addEventListener('close', () => placeToast($('#toast')), true);
 editor.syncUndo();
 editor.layout();

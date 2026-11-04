@@ -88,8 +88,7 @@ function statusLine(st, mirroring) {
 
 function detailLine(st) {
   if (!st.running) return ""
-  var parts = st.notebook ? [st.notebook] : []
-  parts.push(st.pages === 1 ? "1 page" : st.pages + " pages")
+  var parts = st.notebook ? [st.notebook, st.pages === 1 ? "1 page" : st.pages + " pages"] : ["Nothing shown"]
   parts.push(st.views === 1 ? "1 window open" : st.views + " windows open")
   return parts.join(" · ")
 }
@@ -103,6 +102,13 @@ function syncLine(st, nowSec) {
   var mins = Math.max(0, Math.round((nowSec - last.time) / 60))
   var ago = mins < 1 ? "just now" : mins < 60 ? mins + " min ago" : mins < 1440 ? Math.round(mins / 60) + " h ago" : Math.round(mins / 1440) + " d ago"
   return "Synced " + ago + (folder ? " · " + folder : "")
+}
+
+// When the CLI fails without saying why.
+function actionError(action) {
+  var what = { start: "start", stop: "stop", open: "open the share window", sync: "sync the iPad",
+               invite: "open the Invite panel", annotate: "annotate a window" }[action]
+  return "OpenPad could not " + (what || "do that")
 }
 
 // Quote one argument for the floating-terminal launcher, which runs `bash -c`.

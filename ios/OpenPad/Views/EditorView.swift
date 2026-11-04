@@ -21,6 +21,7 @@ struct PageCanvas: UIViewControllerRepresentable {
 
 struct EditorView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var sidebar = false
     @State private var importing = false
     @State private var importAsSection = false
@@ -98,41 +99,52 @@ struct EditorView: View {
 
     // MARK: toolbar
 
+    /// A narrow window (Slide Over, a third of the screen): the top bar's less
+    /// used buttons move into the ⋯ menu, so it still fits.
+    private var compact: Bool { sizeClass == .compact }
+
     private var bar: some View {
         HStack(spacing: 4) {
             Button { model.close() } label: { Image(systemName: "chevron.left").frame(width: 38, height: 38) }
                 .accessibilityLabel("Notebooks")
             Button { sidebar.toggle() } label: { Image(systemName: "sidebar.left").frame(width: 38, height: 38) }
                 .accessibilityLabel("Sections and pages")
-            Button {
-                renameText = pageTitle
-                titling = true
-            } label: {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(model.notebook?.title ?? "").font(.headline).lineLimit(1)
-                    Text(pageTitle.isEmpty ? "Add a page title" : pageTitle)
-                        .font(.caption)
-                        .foregroundStyle(pageTitle.isEmpty ? .tertiary : .secondary)
-                        .lineLimit(1)
+            if !compact {
+                Button {
+                    renameText = pageTitle
+                    titling = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(model.notebook?.title ?? "").font(.headline).lineLimit(1)
+                        Text(pageTitle.isEmpty ? "Add a page title" : pageTitle)
+                            .font(.caption)
+                            .foregroundStyle(pageTitle.isEmpty ? .tertiary : .secondary)
+                            .lineLimit(1)
+                    }
                 }
+                .buttonStyle(.plain)
+                .padding(.leading, 6)
+                .accessibilityLabel("Page title")
             }
-            .buttonStyle(.plain)
-            .padding(.leading, 6)
-            .accessibilityLabel("Page title")
             Spacer(minLength: 8)
             Button { model.go(-1) } label: { Image(systemName: "chevron.up").frame(width: 34, height: 38) }
                 .disabled(position.index <= 0)
                 .accessibilityLabel("Previous page")
-            Text(position.label)
-                .font(.subheadline.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: 170)
+            // A long section name shortens, never the page number.
+            HStack(spacing: 0) {
+                if !compact, let section = position.section { Text("\(section) · ").lineLimit(1) }
+                Text(position.number).fixedSize()
+            }
+            .font(.subheadline.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: 170)
             Button { model.go(1) } label: { Image(systemName: "chevron.down").frame(width: 34, height: 38) }
                 .disabled(position.index >= position.count - 1)
                 .accessibilityLabel("Next page")
-            insertMenu
-            paperMenu
+            if !compact {
+                insertMenu
+                paperMenu
+            }
             liveBadge
             moreMenu
         }
@@ -145,21 +157,26 @@ struct EditorView: View {
         model.pageID.flatMap { model.notebook?.pages[$0]?.title } ?? ""
     }
 
+    @ViewBuilder
+    private var insertItems: some View {
+        Button("Blank page after this", systemImage: "doc") { model.addPage() }
+        Button("PDF pages after this…", systemImage: "doc.on.doc") {
+            importAsSection = false
+            importing = true
+        }
+        Button("PDF as a new section…", systemImage: "doc.badge.plus") {
+            importAsSection = true
+            importing = true
+        }
+        if DocumentScanner.isAvailable {
+            Button("Scan documents…", systemImage: "doc.viewfinder") { scanning = true }
+        }
+        Button("Photos…", systemImage: "photo.on.rectangle") { pickingPhotos = true }
+    }
+
     private var insertMenu: some View {
         Menu {
-            Button("Blank page after this", systemImage: "doc") { model.addPage() }
-            Button("PDF pages after this…", systemImage: "doc.on.doc") {
-                importAsSection = false
-                importing = true
-            }
-            Button("PDF as a new section…", systemImage: "doc.badge.plus") {
-                importAsSection = true
-                importing = true
-            }
-            if DocumentScanner.isAvailable {
-                Button("Scan documents…", systemImage: "doc.viewfinder") { scanning = true }
-            }
-            Button("Photos…", systemImage: "photo.on.rectangle") { pickingPhotos = true }
+            insertItems
         } label: {
             Image(systemName: "plus.rectangle.on.rectangle").frame(width: 38, height: 38)
         } primaryAction: {
@@ -168,24 +185,28 @@ struct EditorView: View {
         .accessibilityLabel("New page (hold for more)")
     }
 
-    private var position: (index: Int, count: Int, label: String) {
-        guard let nb = model.notebook, let id = model.pageID, let i = nb.order.firstIndex(of: id) else { return (0, 0, "") }
+    private var position: (index: Int, count: Int, section: String?, number: String) {
+        guard let nb = model.notebook, let id = model.pageID, let i = nb.order.firstIndex(of: id) else { return (0, 0, nil, "") }
         if nb.layout.sections.count > 1, let sec = nb.section(of: id), let j = sec.pages.firstIndex(of: id) {
-            return (i, nb.order.count, "\(sec.title) · \(j + 1)/\(sec.pages.count)")
+            return (i, nb.order.count, sec.title, "\(j + 1)/\(sec.pages.count)")
         }
-        return (i, nb.order.count, "\(i + 1) / \(nb.order.count)")
+        return (i, nb.order.count, nil, "\(i + 1) / \(nb.order.count)")
+    }
+
+    private var paperPicker: some View {
+        Picker("Paper", selection: Binding(get: { model.pageID.flatMap { model.notebook?.pages[$0]?.paper } ?? "blank" },
+                                           set: { model.setPaper($0) })) {
+            Text("Blank").tag("blank")
+            Text("Lines").tag("lines")
+            Text("Grid").tag("grid")
+            Text("Dots").tag("dots")
+            Text("Engineering").tag("eng")
+        }
     }
 
     private var paperMenu: some View {
         Menu {
-            Picker("Paper", selection: Binding(get: { model.pageID.flatMap { model.notebook?.pages[$0]?.paper } ?? "blank" },
-                                               set: { model.setPaper($0) })) {
-                Text("Blank").tag("blank")
-                Text("Lines").tag("lines")
-                Text("Grid").tag("grid")
-                Text("Dots").tag("dots")
-                Text("Engineering").tag("eng")
-            }
+            paperPicker
         } label: {
             Image(systemName: "squareshape.split.3x3").frame(width: 38, height: 38)
         }
@@ -202,7 +223,7 @@ struct EditorView: View {
                 Circle()
                     .fill(model.liveReady && model.cast ? Color.red : Color.secondary)
                     .frame(width: 8, height: 8)
-                Text(liveText).font(.caption)
+                if !compact { Text(liveText).font(.caption) }
             }
             .padding(.horizontal, 8)
             .frame(height: 30)
@@ -221,6 +242,15 @@ struct EditorView: View {
 
     private var moreMenu: some View {
         Menu {
+            if compact {
+                Button("Page title…", systemImage: "character.cursor.ibeam") {
+                    renameText = pageTitle
+                    titling = true
+                }
+                Menu("Add", systemImage: "plus.rectangle.on.rectangle") { insertItems }
+                Menu("Paper", systemImage: "squareshape.split.3x3") { paperPicker }
+                Divider()
+            }
             Menu("Save as PDF…") {
                 Button("This page") { export(.page) }
                 Button("This section") { export(.section) }

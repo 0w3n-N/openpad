@@ -55,3 +55,10 @@ export function closeOnCancel() {
     if (b) b.closest('dialog').close('cancel');
   });
 }
+
+// A modal dialog keeps everything outside it under its backdrop, so a toast
+// shown while one is open goes inside it (and comes back out when it closes).
+export function placeToast(t) {
+  const open = document.querySelectorAll('dialog[open]');
+  (open[open.length - 1] || document.body).append(t);
+}

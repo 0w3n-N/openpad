@@ -991,6 +991,14 @@ check("typing in the share window isn't a shortcut",
       "if (k !== 'escape' && e.target.closest?.('input')) return;" in open(os.path.join(ROOT, "web", "view.js")).read())
 check("the toolbars measure what fits", "bar.scrollWidth > bar.clientWidth" in ui_js
       and not re.search(r"levels: \[\[\d", app_js + join_js))
+manifest = json.load(open(os.path.join(ROOT, "web", "manifest.webmanifest")))
+png_icon = next(i for i in manifest["icons"] if i["src"] == "icon.png")
+with open(os.path.join(ROOT, "web", "icon.png"), "rb") as f:
+    width, height = struct.unpack(">II", f.read(24)[16:24])
+check("the manifest says the icon's real size", png_icon["sizes"] == f"{width}x{height}", png_icon["sizes"])
+panel_qml = open(os.path.join(ROOT, "Panel.qml")).read()
+check("the plugin's popup scrolls rather than spilling out of its card",
+      "fittedContentHeight(column.implicitHeight)" in panel_qml and "Flickable {" in panel_qml)
 check("only a pending change saves a notebook",
       "if (!current || !(structural || dirtyPages.size)) return;" in app_js and "if mine != digest(open) { saveSoon() }" in swift)
 

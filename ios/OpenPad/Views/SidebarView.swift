@@ -139,6 +139,9 @@ struct SidebarView: View {
                 .padding(.bottom, 20)
             }
             .onAppear { if let id = model.pageID { proxy.scrollTo(id, anchor: .center) } }
+            .onChange(of: model.pageID) { _, id in
+                if let id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+            }
         }
     }
 

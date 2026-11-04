@@ -53,19 +53,23 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // One at a time: says so rather than doing nothing. False if it didn't start.
   function runCli(action, extra) {
-    if (actionProc.running) return
+    if (actionProc.running) {
+      errorText = "Still working on the last action. Try again in a moment."
+      return false
+    }
     errorText = ""
     pendingAction = action
     actionProc.command = ["python3", root.cli, action, "--port", String(root.port)].concat(extra || [])
     actionProc.running = true
+    return true
   }
 
   function toggleAnnotate() {
     if (st.live === "idle") {
-      runCli("annotate")
       // The window picker opens on the desktop; get the popup out of its way.
-      root.close()
+      if (runCli("annotate")) root.close()
     } else {
       runCli("annotate", ["--stop"])
     }
@@ -75,8 +79,14 @@ Panel {
     runCli(st.running ? "stop" : "start")
   }
 
+  function annotateOrSetup() {
+    if (doctor.known && !doctor.capture) runSetup()
+    else toggleAnnotate()
+  }
+
   function openWindow() {
-    runCli("open")
+    // The new window would open behind the popup.
+    if (runCli("open")) root.close()
   }
 
   function syncNow() {
@@ -86,8 +96,7 @@ Panel {
   }
 
   function invite() {
-    runCli("invite")
-    root.close()
+    if (runCli("invite")) root.close()
   }
 
   function toggleMirror() {
@@ -124,9 +133,16 @@ Panel {
     else if (name === "open") openWindow()
     else if (name === "invite") invite()
     else if (name === "sync") syncNow()
-    else if (name === "annotate") toggleAnnotate()
+    else if (name === "annotate") annotateOrSetup()
     else if (name === "mirror") toggleMirror()
     else if (name === "setup") runSetup()
+  }
+
+  // Keep the keyboard's row in view when the popup has to scroll (a small screen).
+  function reveal(item) {
+    var y = item.mapToItem(column, 0, 0).y
+    if (y < scroller.contentY) scroller.contentY = y
+    else if (y + item.height > scroller.contentY + scroller.height) scroller.contentY = y + item.height - scroller.height
   }
 
   function moveCursor(dy) {
@@ -137,11 +153,16 @@ Panel {
     cursorIndex = Math.max(0, Math.min(rows.length - 1, cursorIndex + dy))
   }
 
-  onOpenedChanged: if (opened) {
-    cursorActive = false
-    cursorIndex = 0
-    refresh()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  onOpenedChanged: {
+    if (opened) {
+      cursorActive = false
+      cursorIndex = 0
+      scroller.contentY = 0
+      refresh()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    } else if (!actionProc.running) {
+      errorText = "" // seen; one from an action still running shows next time
+    }
   }
 
   Component.onCompleted: refresh()
@@ -189,7 +210,7 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         var msg = Model.singleLine(String(actionErr.text || "").trim().split("\n").pop(), 200)
-        root.errorText = msg || "OpenPad could not " + root.pendingAction + " the whiteboard"
+        root.errorText = msg || Model.actionError(root.pendingAction)
       }
       root.pendingAction = ""
       root.refresh()
@@ -273,7 +294,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -285,211 +306,222 @@ Panel {
       onTextKey: function(t) {
         var k = t.toLowerCase()
         if (k === "s") root.toggleServer()
-        else if (k === "a") root.toggleAnnotate()
+        else if (k === "a") root.annotateOrSetup()
         else if (k === "o") root.openWindow()
         else if (k === "m") root.toggleMirror()
       }
 
-      Column {
-        id: column
-        width: parent.width
-        spacing: Style.space(12)
+      Flickable {
+        id: scroller
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        clip: true
 
-        PanelHero {
-          id: hero
-          width: parent.width
-          title: "OpenPad"
-          meta: root.pendingAction === "start" ? "Starting…"
-            : root.pendingAction === "stop" ? "Stopping…"
-            : root.st.live === "live" ? "Window live"
-            : Model.statusLine(root.st, root.mirroring)
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconComponent: Component {
-            OpenPadIcon {
-              iconSize: Style.font.display
-              color: root.live ? Color.accent : root.foreground
-            }
-          }
-          trailingControl: Component {
-            ToggleSwitch {
-              id: serverSwitch
-              checked: root.serverOn
-              busy: root.pendingAction !== ""
-              foreground: hero.foreground
-              onToggled: root.toggleServer()
+        Column {
+          id: column
+          width: scroller.width
+          spacing: Style.space(12)
 
-              PanelToolTip {
-                visible: serverSwitch.containsMouse
-                text: root.st.running ? "Stop OpenPad" : "Start OpenPad"
-                fontFamily: hero.fontFamily
+          PanelHero {
+            id: hero
+            width: parent.width
+            title: "OpenPad"
+            meta: root.pendingAction === "start" ? "Starting…"
+              : root.pendingAction === "stop" ? "Stopping…"
+              : root.st.live === "live" ? "Window live"
+              : Model.statusLine(root.st, root.mirroring)
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconComponent: Component {
+              OpenPadIcon {
+                iconSize: Style.font.display
+                color: root.live ? Color.accent : root.foreground
               }
             }
-          }
-        }
+            trailingControl: Component {
+              ToggleSwitch {
+                id: serverSwitch
+                checked: root.serverOn
+                busy: root.pendingAction !== ""
+                foreground: hero.foreground
+                onToggled: root.toggleServer()
 
-        Text {
-          textFormat: Text.PlainText
-          visible: root.errorText !== ""
-          width: parent.width
-          text: root.errorText
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.Wrap
-        }
-
-        // Pairing: QR code drawn natively from the server's matrix.
-        Row {
-          visible: root.st.running && root.st.qrSize > 0
-          width: parent.width
-          spacing: Style.space(14)
-
-          Rectangle {
-            id: qrCanvas
-            readonly property int moduleSize: root.st.qrSize > 0 ? Math.max(3, Math.floor(Style.space(132) / root.st.qrSize)) : 0
-            width: root.st.qrSize * moduleSize
-            height: width
-            color: "white"
-            radius: Style.cornerRadius
-
-            Grid {
-              anchors.fill: parent
-              columns: root.st.qrSize
-
-              Repeater {
-                model: root.opened ? root.st.qrSize * root.st.qrSize : 0
-
-                Rectangle {
-                  required property int index
-                  width: qrCanvas.moduleSize
-                  height: qrCanvas.moduleSize
-                  color: root.st.qr[Math.floor(index / root.st.qrSize)].charAt(index % root.st.qrSize) === "1" ? "#111111" : "transparent"
+                PanelToolTip {
+                  visible: serverSwitch.containsMouse
+                  text: root.st.running ? "Stop OpenPad" : "Start OpenPad"
+                  fontFamily: hero.fontFamily
                 }
               }
             }
           }
 
-          Column {
-            width: parent.width - qrCanvas.width - parent.spacing
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(6)
+          Text {
+            textFormat: Text.PlainText
+            visible: root.errorText !== ""
+            width: parent.width
+            text: root.errorText
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+          }
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: "Scan with the iPad: in the OpenPad app tap Connect, or use the Camera app"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.Wrap
+          // Pairing: QR code drawn natively from the server's matrix.
+          Row {
+            visible: root.st.running && root.st.qrSize > 0
+            width: parent.width
+            spacing: Style.space(14)
+
+            Rectangle {
+              id: qrCanvas
+              readonly property int moduleSize: root.st.qrSize > 0 ? Math.max(3, Math.floor(Style.space(132) / root.st.qrSize)) : 0
+              width: root.st.qrSize * moduleSize
+              height: width
+              color: "white"
+              radius: Style.cornerRadius
+
+              Grid {
+                anchors.fill: parent
+                columns: root.st.qrSize
+
+                Repeater {
+                  model: root.opened ? root.st.qrSize * root.st.qrSize : 0
+
+                  Rectangle {
+                    required property int index
+                    width: qrCanvas.moduleSize
+                    height: qrCanvas.moduleSize
+                    color: root.st.qr[Math.floor(index / root.st.qrSize)].charAt(index % root.st.qrSize) === "1" ? "#111111" : "transparent"
+                  }
+                }
+              }
             }
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: Model.urlForDisplay(root.st.url)
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: Model.detailLine(root.st)
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
+
+            Column {
+              width: parent.width - qrCanvas.width - parent.spacing
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: "Scan with the iPad: in the OpenPad app tap Connect, or use the Camera app"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.Wrap
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: Model.urlForDisplay(root.st.url)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: Model.detailLine(root.st)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
             }
           }
-        }
 
-        Text {
-          textFormat: Text.PlainText
-          visible: root.st.running && root.st.url === ""
-          width: parent.width
-          text: "No Wi-Fi or Ethernet address found. Connect to the same network as the iPad."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.Wrap
-        }
+          Text {
+            textFormat: Text.PlainText
+            visible: root.st.running && root.st.url === ""
+            width: parent.width
+            text: "No Wi-Fi or Ethernet address found. Connect to the same network as the iPad."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+          }
 
-        ActionRow {
-          name: root.st.running ? "open" : "start"
-          glyph: "󰍹"
-          title: root.st.running ? "Open the share window" : "Start OpenPad"
-          subtitle: root.st.running
-            ? "A clean window to share in Zoom, Teams or Meet"
-            : "Then scan the QR code with your iPad"
-          onActivated: root.st.running ? root.openWindow() : root.toggleServer()
-        }
+          ActionRow {
+            name: root.st.running ? "open" : "start"
+            glyph: "󰍹"
+            title: root.st.running ? "Open the share window" : "Start OpenPad"
+            subtitle: root.st.running
+              ? "A clean window to share in Zoom, Teams or Meet"
+              : "Then scan the QR code with your iPad"
+            onActivated: root.st.running ? root.openWindow() : root.toggleServer()
+          }
 
-        ActionRow {
-          name: "sync"
-          glyph: "󰓦"
-          title: root.pendingAction === "sync" ? "Syncing the iPad…" : "Sync iPad"
-          subtitle: Model.syncLine(root.st, root.nowSec)
-          onActivated: root.syncNow()
-        }
+          ActionRow {
+            name: "sync"
+            glyph: "󰓦"
+            title: root.pendingAction === "sync" ? "Syncing the iPad…" : "Sync iPad"
+            subtitle: Model.syncLine(root.st, root.nowSec)
+            onActivated: root.syncNow()
+          }
 
-        ActionRow {
-          name: "invite"
-          glyph: "󰐲"
-          title: root.st.guests > 0 ? "Invite people  ·  " + root.st.guests + " joined" : "Invite people"
-          subtitle: root.st.internet ? "Internet link is on. Open to turn it off"
-            : "A link to watch and write along live, and save PDFs"
-          onActivated: root.invite()
-        }
+          ActionRow {
+            name: "invite"
+            glyph: "󰐲"
+            title: root.st.guests > 0 ? "Invite people  ·  " + root.st.guests + " joined" : "Invite people"
+            subtitle: root.st.internet ? "Internet link is on. Open to turn it off"
+              : "A link to watch and write along live, and save PDFs"
+            onActivated: root.invite()
+          }
 
-        ActionRow {
-          name: "annotate"
-          glyph: "󰙏"
-          title: "Annotate a window"
-          showSwitch: root.doctor.capture
-          switchOn: root.st.live !== "idle"
-          subtitle: root.st.live === "picking" ? "Choose the window in the share picker…"
-            : root.st.live === "live" ? "Live on the iPad as its own page. Select to stop"
-            : root.doctor.known && !root.doctor.capture ? "Needs GStreamer packages. Select Setup below"
-            : "Show one window on the iPad and draw over it"
-          onActivated: root.doctor.known && !root.doctor.capture ? root.runSetup() : root.toggleAnnotate()
-        }
+          ActionRow {
+            name: "annotate"
+            glyph: "󰙏"
+            title: "Annotate a window"
+            showSwitch: root.doctor.capture
+            switchOn: root.st.live !== "idle"
+            subtitle: root.st.live === "picking" ? "Choose the window in the share picker…"
+              : root.st.live === "live" ? "Live on the iPad as its own page. Select to stop"
+              : root.doctor.known && !root.doctor.capture ? "Needs GStreamer packages. Select Setup below"
+              : "Show one window on the iPad and draw over it"
+            onActivated: root.annotateOrSetup()
+          }
 
-        PanelSeparator { foreground: root.foreground }
+          PanelSeparator { foreground: root.foreground }
 
-        PanelSectionHeader {
-          text: "SCREEN MIRRORING"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
+          PanelSectionHeader {
+            text: "SCREEN MIRRORING"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
 
-        ActionRow {
-          name: "mirror"
-          glyph: "󰄘"
-          title: "AirPlay receiver"
-          showSwitch: root.doctor.uxplay
-          switchOn: root.mirroring
-          subtitle: root.mirroring
-            ? "On the iPad: Control Center › Screen Mirroring › " + root.airplayName
-              + (root.mirrorInfo.pin !== "" ? "  ·  PIN " + root.mirrorInfo.pin : "")
-            : root.doctor.known && !root.doctor.uxplay
-              ? "Needs UxPlay. Select to run setup"
-              : "Mirror any iPad app into a window"
-          onActivated: root.toggleMirror()
-        }
+          ActionRow {
+            name: "mirror"
+            glyph: "󰄘"
+            title: "AirPlay receiver"
+            showSwitch: root.doctor.uxplay
+            switchOn: root.mirroring
+            subtitle: root.mirroring
+              ? "On the iPad: Control Center › Screen Mirroring › " + root.airplayName
+                + (root.mirrorInfo.pin !== "" ? "  ·  PIN " + root.mirrorInfo.pin : "")
+              : root.doctor.known && !root.doctor.uxplay
+                ? "Needs UxPlay. Select to run setup"
+                : "Mirror any iPad app into a window"
+            onActivated: root.toggleMirror()
+          }
 
-        PanelSeparator { foreground: root.foreground }
+          PanelSeparator { foreground: root.foreground }
 
-        ActionRow {
-          name: "setup"
-          glyph: "󰒓"
-          title: "Setup"
-          subtitle: !root.doctor.known ? "Install helpers and open the firewall port"
-            : Model.needsSetup(root.doctor)
-              ? (root.doctor.firewall === "needs-setup" ? "The firewall may block your iPad. Select to fix" : "Some helpers are missing. Select to install")
-              : "Everything is ready"
-          onActivated: root.runSetup()
+          ActionRow {
+            name: "setup"
+            glyph: "󰒓"
+            title: "Setup"
+            subtitle: !root.doctor.known ? "Install helpers and open the firewall port"
+              : Model.needsSetup(root.doctor)
+                ? (root.doctor.firewall === "needs-setup" ? "The firewall may block your iPad. Select to fix" : "Some helpers are missing. Select to install")
+                : "Everything is ready"
+            onActivated: root.runSetup()
+          }
         }
       }
     }
@@ -509,6 +541,7 @@ Panel {
 
     width: parent ? parent.width : 0
     hasCursor: root.cursorActive && root.rows[root.cursorIndex] === name
+    onHasCursorChanged: if (hasCursor) root.reveal(row)
     foreground: root.foreground
     implicitHeight: rowLayout.implicitHeight + Style.spacing.rowPaddingX
 
@@ -541,6 +574,8 @@ Panel {
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.heading
+        horizontalAlignment: Text.AlignHCenter
+        Layout.preferredWidth: Style.font.heading  // icons differ in width; titles line up
         Layout.alignment: Qt.AlignVCenter
       }
 

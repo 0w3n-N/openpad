@@ -417,6 +417,7 @@ function toggleGuests() {
   el.hidden = !el.hidden;
   if (!el.hidden) {
     $('#pair').hidden = true;
+    $('#syncpanel').hidden = true;
     guestAction();
   }
 }
@@ -522,6 +523,7 @@ async function save() {
 function togglePair() {
   pairForced = $('#pair').hidden;
   $('#guests').hidden = true;
+  $('#syncpanel').hidden = true;
   syncPair();
 }
 
